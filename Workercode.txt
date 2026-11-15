@@ -453,6 +453,24 @@ async function ensureSchema(env) {
   schemaReady = true;
 }
 
+let arcadeSchemaReady = false;
+async function ensureArcadeSchema(env) {
+  if (arcadeSchemaReady) return;
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS arcade_games (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      object_key TEXT NOT NULL UNIQUE,
+      size INTEGER NOT NULL,
+      added_by TEXT NOT NULL,
+      added_at INTEGER NOT NULL,
+      FOREIGN KEY (added_by) REFERENCES users(id)
+    )
+  `).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_arcade_games_added ON arcade_games(added_at DESC)").run();
+  arcadeSchemaReady = true;
+}
+
 async function ensureAdminSchema(env) {
   if (adminSchemaReady) return;
 
@@ -798,6 +816,87 @@ export default {
 
         const token = await createSession(env, user.id);
         return json({ success: true, user: publicUser(user), token });
+      }
+
+      // Shared Chatty Arcade: all signed-in users can list/play; only the Owner can upload/delete.
+      if (path === "/api/arcade" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureArcadeSchema(env);
+        const result = await env.DB.prepare(`
+          SELECT id, name, size, added_by, added_at
+          FROM arcade_games ORDER BY added_at DESC, name COLLATE NOCASE
+        `).all();
+        return json({ games: result.results || [] });
+      }
+
+      if (path === "/api/arcade/upload" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        if (!isOwner(user)) return json({ error: "Owner access required" }, 403);
+        if (!env.ARCADE_BUCKET) return json({ error: "Arcade storage is not configured. Add the ARCADE_BUCKET R2 binding first." }, 503);
+        const body = await readBody(request, 1700000);
+        const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+        if (!name) return json({ error: "Enter a game name" }, 400);
+        if (typeof body.html !== "string" || !body.html.trim()) return json({ error: "The HTML game file is empty or invalid" }, 400);
+        const bytes = new TextEncoder().encode(body.html);
+        if (bytes.byteLength > 1500000) return json({ error: "Game files must be 1.5 MB or smaller" }, 413);
+        const lowerHtml = body.html.toLowerCase();
+        if (!lowerHtml.includes("<html") && !lowerHtml.includes("<!doctype html")) return json({ error: "That file does not look like an HTML game" }, 400);
+        await ensureArcadeSchema(env);
+        const id = randomId(18);
+        const objectKey = "games/" + id + ".html";
+        const now = Date.now();
+        await env.ARCADE_BUCKET.put(objectKey, body.html, {
+          httpMetadata: { contentType: "text/html; charset=utf-8", cacheControl: "no-store" }
+        });
+        try {
+          await env.DB.prepare(`
+            INSERT INTO arcade_games (id, name, object_key, size, added_by, added_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).bind(id, name, objectKey, bytes.byteLength, user.id, now).run();
+        } catch (error) {
+          await env.ARCADE_BUCKET.delete(objectKey);
+          throw error;
+        }
+        await audit(env, user.id, "arcade_game_uploaded", id);
+        return json({ success: true, game: { id, name, size: bytes.byteLength, added_by: user.id, added_at: now } }, 201);
+      }
+
+      const arcadeId = path.startsWith("/api/arcade/") ? path.slice("/api/arcade/".length) : "";
+      if (arcadeId && /^[A-Za-z0-9_-]{8,80}$/.test(arcadeId) && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        if (!env.ARCADE_BUCKET) return json({ error: "Arcade storage is not configured" }, 503);
+        await ensureArcadeSchema(env);
+        const game = await env.DB.prepare("SELECT object_key FROM arcade_games WHERE id = ?").bind(arcadeId).first();
+        if (!game) return json({ error: "Game not found" }, 404);
+        const object = await env.ARCADE_BUCKET.get(game.object_key);
+        if (!object) return json({ error: "Game file is missing from storage" }, 404);
+        return new Response(object.body, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-modals allow-pointer-lock"
+          }
+        });
+      }
+
+      if (arcadeId && /^[A-Za-z0-9_-]{8,80}$/.test(arcadeId) && request.method === "DELETE") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        if (!isOwner(user)) return json({ error: "Owner access required" }, 403);
+        if (!env.ARCADE_BUCKET) return json({ error: "Arcade storage is not configured" }, 503);
+        await ensureArcadeSchema(env);
+        const game = await env.DB.prepare("SELECT object_key FROM arcade_games WHERE id = ?").bind(arcadeId).first();
+        if (!game) return json({ error: "Game not found" }, 404);
+        await env.ARCADE_BUCKET.delete(game.object_key);
+        await env.DB.prepare("DELETE FROM arcade_games WHERE id = ?").bind(arcadeId).run();
+        await audit(env, user.id, "arcade_game_removed", arcadeId);
+        return json({ success: true });
       }
 
       if (path === "/api/me" && request.method === "GET") {
