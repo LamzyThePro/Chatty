@@ -371,7 +371,7 @@ dialog::backdrop{backdrop-filter:blur(5px)}
   </div>
   <div class="sec owner-only" id="ownerUpdateHistory"><b>Update history</b><button class="btn ghost" id="refreshUpdates">Refresh history</button><div id="adminUpdates"></div></div>
   <div class="sec owner-only" id="ownerArcade"><b>Arcade games</b>
-    <p>Upload a game once and it appears in every signed-in user's Arcade. Only the Owner can upload or remove games.</p>
+    <p>Upload an HTML game once and it appears for every signed-in Chatty user. Only the Owner can upload or remove games. Files are stored in the Chatty GitHub Release (95 MB maximum per game).</p>
     <input type="file" id="arcadeFile" accept=".html,text/html" style="display:block;width:100%;margin:8px 0">
     <input type="text" id="arcadeName" maxlength="40" placeholder="Game name (optional)" autocomplete="off">
     <div class="acts" style="justify-content:flex-start;align-items:center"><button class="btn" id="arcadeAdd" type="button">Upload game to everyone</button><span id="arcadeStatus" class="note" role="status" style="padding:6px"></span></div>
@@ -439,7 +439,7 @@ const PEER_OPTS = Object.assign({ debug: 0, config: { iceServers: [
 
 /* ---------- storage (debounced) ---------- */
 const LS = 'chatty1:';
-const APP_VERSION = '1.0.21';
+const APP_VERSION = '1.0.22';
 const APP_RELEASE_DATE = '2026-11-15';
 $('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');
 const API_BASE = 'https://chatty.yeshas-sujith.workers.dev';
@@ -453,7 +453,8 @@ let authUser = store.get('authUser', null);
 let authMode = 'login';
 let registrationMode = 'invite_only';
 async function api(path, options = {}) {
-  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const headers = Object.assign(isFormData ? {} : { 'Content-Type': 'application/json' }, options.headers || {});
   if (authToken) headers.Authorization = 'Bearer ' + authToken;
   const response = await fetch(API_BASE + path, Object.assign({}, options, { headers, cache: 'no-store' }));
   let data = {}; try { data = await response.json(); } catch (_) {}
@@ -2201,8 +2202,10 @@ async function arcMigrateLegacyGames(remoteGames) {
     try {
       const rec = await arcTx('readonly', (gs, fs) => fs.get(local.id));
       if (!rec || !rec.blob) continue;
-      const source = await rec.blob.text();
-      await api('/api/arcade/upload', { method: 'POST', body: JSON.stringify({ name: String(local.name || 'Imported game').slice(0, 40), html: source }) });
+      const form = new FormData();
+      form.append('name', String(local.name || 'Imported game').slice(0, 40));
+      form.append('file', rec.blob, 'legacy-game.html');
+      await api('/api/arcade/upload', { method: 'POST', body: form });
     } catch (e) {
       if ($('arcadeStatus')) $('arcadeStatus').textContent = 'Could not import an older local game: ' + e.message;
       break;
@@ -2251,12 +2254,14 @@ $('arcadeAdd').addEventListener('click', async () => {
   if (!f) { st.textContent = 'Choose a game’s HTML file first.'; return; }
   if (!/\.html?$/i.test(f.name)) { st.textContent = 'That isn’t an .html file.'; return; }
   if (!f.size) { st.textContent = 'That file is empty.'; return; }
-  if (f.size > 1500000) { st.textContent = 'Game files must be 1.5 MB or smaller.'; return; }
+  if (f.size > 95000000) { st.textContent = 'Game files must be 95 MB or smaller.'; return; }
   const name = ($('arcadeName').value.trim() || f.name.replace(/\.html?$/i, '')).slice(0, 40);
-  $('arcadeAdd').disabled = true; st.textContent = 'Uploading ' + arcSize(f.size) + ' to the shared Arcade…';
+  $('arcadeAdd').disabled = true; st.textContent = 'Uploading ' + arcSize(f.size) + ' to the shared Arcade… Keep this tab open.';
   try {
-    const source = await f.text();
-    await api('/api/arcade/upload', { method: 'POST', body: JSON.stringify({ name, html: source }) });
+    const form = new FormData();
+    form.append('name', name);
+    form.append('file', f, f.name);
+    await api('/api/arcade/upload', { method: 'POST', body: form });
     st.textContent = 'Uploaded “' + name + '”. It is now available to all Chatty users.';
     $('arcadeFile').value = ''; $('arcadeName').value = '';
     await renderArcade();
