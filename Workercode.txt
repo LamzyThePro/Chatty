@@ -1,0 +1,2043 @@
+const ITERATIONS = 100000;
+const SESSION_DAYS = 30;
+const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const MAX_APP_BYTES = 1800000;
+const APP_MARKER = 'name="application-name" content="Chatty"';
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Content-Type": "application/json"
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), { status, headers: cors });
+}
+
+function randomId(bytes = 24) {
+  const data = crypto.getRandomValues(new Uint8Array(bytes));
+  return btoa(String.fromCharCode(...data))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function randomInviteCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(bytes, byte => INVITE_ALPHABET[byte & 31]).join("");
+}
+
+async function hash(value) {
+  const data = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return btoa(String.fromCharCode(...new Uint8Array(data)));
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function constantTimeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function nextPatchVersion(value) {
+  const match = String(value || "1.0.0").match(/^(\d+)\.(\d+)\.(\d+)(?:[-_.].*)?$/);
+  if (!match) return "1.0.0";
+  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3]) + 1}`;
+}
+
+function compareVersions(a, b) {
+  const parse = v => {
+    const m = String(v).match(/^(\d+(?:\.\d+)*)(?:[-_.]?(.+))?$/);
+    return m
+      ? { nums: m[1].split(".").map(Number), pre: m[2] || "" }
+      : { nums: [0], pre: String(v) };
+  };
+
+  const x = parse(a), y = parse(b), len = Math.max(x.nums.length, y.nums.length);
+
+  for (let i = 0; i < len; i++) {
+    const d = (x.nums[i] || 0) - (y.nums[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+
+  if (x.pre === y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
+
+async function passwordHash(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: ITERATIONS, hash: "SHA-256" },
+    key, 256
+  );
+  const encode = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  return `pbkdf2$${ITERATIONS}$${encode(salt)}$${encode(bits)}`;
+}
+
+function storedPasswordIterations(stored) {
+  if (typeof stored !== "string") return 0;
+  const parts = stored.split("$");
+  const n = Number(parts[1]);
+  return parts[0] === "pbkdf2" && Number.isInteger(n) ? n : 0;
+}
+
+async function verifyPassword(password, stored) {
+  try {
+    const [, iterationsText, saltText, expected] = stored.split("$");
+    const iterations = Number(iterationsText);
+
+    if (!Number.isInteger(iterations) || iterations < 10000 || iterations > 1000000) {
+      return false;
+    }
+
+    const decode = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
+    const salt = decode(saltText);
+    const expectedBytes = decode(expected);
+
+    if (salt.length !== 16 || expectedBytes.length !== 32) return false;
+
+    const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt, iterations, hash: "SHA-256" }, key, 256
+    );
+
+    return constantTimeEqual(
+      btoa(String.fromCharCode(...new Uint8Array(bits))),
+      expected
+    );
+  } catch {
+    return false;
+  }
+}
+
+const RATE_LIMIT_POLICIES = Object.freeze({
+  register: { default: 8, min: 1, max: 20 },
+  login: { default: 10, min: 1, max: 30 },
+  "user-search": { default: 30, min: 1, max: 120 },
+  "send-message": { default: 60, min: 10, max: 240 },
+  "group-create": { default: 5, min: 1, max: 20 },
+  "group-member": { default: 30, min: 5, max: 120 }
+});
+
+async function getRateLimitValue(env, label) {
+  const policy = RATE_LIMIT_POLICIES[label];
+  if (!policy) return 10;
+  const stored = await getSetting(env, `rate_limit_${label}`, String(policy.default));
+  return boundedInt(stored, policy.default, policy.min, policy.max);
+}
+
+async function incrementRateBucket(env, key, now, windowMs) {
+  const result = await env.DB.prepare(`
+    INSERT INTO rate_limits (rate_key, window_start, attempts) VALUES (?, ?, 1)
+    ON CONFLICT(rate_key) DO UPDATE SET
+      attempts = CASE WHEN window_start <= ? THEN 1 ELSE attempts + 1 END,
+      window_start = CASE WHEN window_start <= ? THEN ? ELSE window_start END
+    RETURNING attempts
+  `).bind(key, now, now - windowMs, now - windowMs, now).first();
+
+  return Number(result?.attempts || 0);
+}
+
+let rateCleanupTick = 0;
+
+async function rateLimit(request, env, label, identity = null) {
+  const limit = await getRateLimitValue(env, label);
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const now = Date.now(), windowMs = 15 * 60 * 1000;
+
+  const ipKey = await hash(`v2:${label}:ip:${ip}`);
+  const ipAttempts = await incrementRateBucket(env, ipKey, now, windowMs);
+
+  let identityAttempts = 0;
+
+  if (typeof identity === "string" && identity.length) {
+    const normalized = identity.trim().toLowerCase().slice(0, 160);
+    const identityKey = await hash(`v2:${label}:identity:${normalized}`);
+    identityAttempts = await incrementRateBucket(env, identityKey, now, windowMs);
+  }
+
+  rateCleanupTick = (rateCleanupTick + 1) % 100;
+
+  if (rateCleanupTick === 0) {
+    await env.DB.prepare(`
+      DELETE FROM rate_limits WHERE rate_key IN (
+        SELECT rate_key FROM rate_limits WHERE window_start < ? LIMIT 250
+      )
+    `).bind(now - 24 * 60 * 60 * 1000).run();
+  }
+
+  return ipAttempts > 0 && ipAttempts <= limit &&
+    (identity === null || (identityAttempts > 0 && identityAttempts <= limit));
+}
+
+async function audit(env, actor, action, target = null) {
+  await env.DB.prepare(`
+    INSERT INTO audit_logs (actor_id, action, target_id, created_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(actor, action, target, Date.now()).run();
+}
+
+async function getUser(request, env) {
+  const header = request.headers.get("Authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token || token.length > 200) return null;
+
+  const tokenHash = await hash(token);
+
+  const user = await env.DB.prepare(`
+    SELECT u.id, u.username, u.role
+    FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE s.token_hash = ? AND s.expires_at > ?
+  `).bind(tokenHash, Date.now()).first();
+
+  if (!user) return null;
+
+  const ban = await env.DB.prepare("SELECT user_id FROM bans WHERE user_id = ?")
+    .bind(user.id).first();
+
+  return ban ? null : user;
+}
+
+function publicUser(user) {
+  if (!user) return null;
+  const privileged = ["owner", "moderator", "admin"].includes(user.role);
+
+  return {
+    id: user.id,
+    username: user.username,
+    role: privileged ? "admin" : "user",
+    accessLevel: user.role
+  };
+}
+
+async function createSession(env, userId) {
+  const token = randomId(32);
+
+  await env.DB.prepare(`
+    INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)
+  `).bind(await hash(token), userId, Date.now() + SESSION_DAYS * 86400000).run();
+
+  return token;
+}
+
+async function readBody(request, maxChars = 10000) {
+  const maxBytes = maxChars * 4;
+  const declaredHeader = request.headers.get("Content-Length");
+
+  if (declaredHeader !== null) {
+    const declared = Number(declaredHeader);
+    if (!Number.isSafeInteger(declared) || declared < 0) {
+      throw new Error("Invalid request length");
+    }
+    if (declared > maxBytes) throw new Error("Request too large");
+  }
+
+  if (!request.body) throw new Error("Invalid JSON body");
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("Request too large");
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  let text;
+
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+
+  if (text.length > maxChars) throw new Error("Request too large");
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid JSON body");
+  }
+
+  return parsed;
+}
+
+function validUsername(username) {
+  return typeof username === "string" && /^[a-zA-Z0-9_-]{3,20}$/.test(username);
+}
+
+function validPassword(password) {
+  return typeof password === "string" && password.length >= 10 && password.length <= 128;
+}
+
+function isOwner(user) {
+  return user?.role === "owner";
+}
+
+function isPrivileged(user) {
+  return user?.role === "owner" || user?.role === "moderator" || user?.role === "admin";
+}
+
+async function adminOnly(request, env) {
+  const user = await getUser(request, env);
+  return isPrivileged(user) ? user : null;
+}
+
+function ownerOnly(user) {
+  return isOwner(user);
+}
+
+async function getMaxUsers(env) {
+  const setting = await env.DB.prepare(
+    "SELECT value FROM app_settings WHERE key = 'max_users'"
+  ).first();
+
+  const value = Number(setting?.value ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+async function getUserCount(env) {
+  const result = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+  return Number(result?.count || 0);
+}
+
+async function getSetting(env, key, fallback = "") {
+  const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?")
+    .bind(key).first();
+
+  return row?.value ?? fallback;
+}
+
+async function getRegistrationMode(env) {
+  // Fail closed: only the exact value "open" enables public registration.
+  return (await getSetting(env, "registration_mode", "invite_only")) === "open"
+    ? "open"
+    : "invite_only";
+}
+
+async function setSetting(env, key, value) {
+  await env.DB.prepare(`
+    INSERT INTO app_settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).bind(key, String(value)).run();
+}
+
+let schemaReady = false;
+let typingSchemaReady = false;
+let adminSchemaReady = false;
+
+let groupSchemaReady = false;
+async function ensureGroupSchema(env) {
+  if (groupSchemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS group_details (
+      conversation_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS group_admins (
+      conversation_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      assigned_at INTEGER NOT NULL,
+      assigned_by TEXT NOT NULL,
+      PRIMARY KEY (conversation_id, user_id),
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (assigned_by) REFERENCES users(id)
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      reaction TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (message_id, user_id, reaction),
+      FOREIGN KEY (message_id) REFERENCES messages(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )`),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)")
+  ]);
+  const columns = await env.DB.prepare("PRAGMA table_info(messages)").all();
+  if (!(columns.results || []).some(c => c.name === "reply_to_message_id")) {
+    try {
+      await env.DB.prepare("ALTER TABLE messages ADD COLUMN reply_to_message_id INTEGER REFERENCES messages(id)").run();
+    } catch (error) {
+      // Another Worker isolate may have completed the same additive migration.
+      const refreshed = await env.DB.prepare("PRAGMA table_info(messages)").all();
+      const exists = (refreshed.results || []).some(c => c.name === "reply_to_message_id");
+      if (!exists) throw error;
+    }
+  }
+  groupSchemaReady = true;
+}
+async function getGroupAdmin(env, conversationId, userId) {
+  return await env.DB.prepare(`
+    SELECT 1 FROM group_admins ga
+    JOIN conversations c ON c.id = ga.conversation_id AND c.type = 'group'
+    JOIN conversation_members cm ON cm.conversation_id = ga.conversation_id AND cm.user_id = ga.user_id
+    WHERE ga.conversation_id = ? AND ga.user_id = ?
+  `).bind(conversationId, userId).first();
+}
+async function getGroup(env, conversationId) {
+  return await env.DB.prepare(`
+    SELECT c.id, c.type, gd.name, gd.created_by, gd.created_at
+    FROM conversations c JOIN group_details gd ON gd.conversation_id = c.id
+    WHERE c.id = ? AND c.type = 'group'
+  `).bind(conversationId).first();
+}
+
+
+async function ensureSchema(env) {
+  if (schemaReady) return;
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS app_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      version TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      html TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `).run();
+
+  const info = await env.DB.prepare("PRAGMA table_info(app_updates)").all();
+  const names = new Set((info.results || []).map(c => c.name));
+
+  if (!names.has("sha256")) {
+    await env.DB.prepare("ALTER TABLE app_updates ADD COLUMN sha256 TEXT").run();
+  }
+  if (!names.has("file_id")) {
+    await env.DB.prepare("ALTER TABLE app_updates ADD COLUMN file_id INTEGER").run();
+  }
+
+  schemaReady = true;
+}
+
+async function ensureAdminSchema(env) {
+  if (adminSchemaReady) return;
+
+  const inviteInfo = await env.DB.prepare("PRAGMA table_info(invites)").all();
+  const inviteColumns = new Set((inviteInfo.results || []).map(c => c.name));
+
+  if (!inviteColumns.has("id")) {
+    await env.DB.prepare("ALTER TABLE invites ADD COLUMN id TEXT").run();
+  }
+
+  await env.DB.prepare(`
+    UPDATE invites SET id = lower(hex(randomblob(16)))
+    WHERE id IS NULL OR id = ''
+  `).run();
+
+  await env.DB.prepare(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_id ON invites(id)"
+  ).run();
+
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_expiry ON sessions(user_id, expires_at)"
+  ).run();
+
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
+  ).run();
+
+  // Promote one legacy admin only when no owner already exists.
+  // If an owner exists, all legacy admin accounts become moderators instead.
+  await env.DB.prepare(`
+    UPDATE users SET role = 'owner'
+    WHERE role = 'admin'
+      AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')
+      AND id = (
+        SELECT id FROM users WHERE role = 'admin'
+        ORDER BY created_at ASC, id ASC LIMIT 1
+      )
+  `).run();
+
+  await env.DB.prepare(
+    "UPDATE users SET role = 'moderator' WHERE role = 'admin'"
+  ).run();
+
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO app_settings (key, value)
+    VALUES ('maintenance_mode', 'false')
+  `).run();
+
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO app_settings (key, value)
+    VALUES ('maintenance_message', 'Chatty is temporarily unavailable for maintenance.')
+  `).run();
+
+  adminSchemaReady = true;
+}
+
+async function ensureTypingSchema(env) {
+  if (typingSchemaReady) return;
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS typing_status (
+      conversation_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      typing_until INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, user_id),
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `).run();
+
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_typing_expiry ON typing_status(typing_until)"
+  ).run();
+
+  typingSchemaReady = true;
+}
+
+async function isConversationMember(env, conversationId, userId) {
+  return await env.DB.prepare(`
+    SELECT 1 FROM conversation_members
+    WHERE conversation_id = ? AND user_id = ?
+  `).bind(conversationId, userId).first();
+}
+
+function boundedInt(value, fallback, min, max) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+}
+
+function escapeLike(value) {
+  return value.replace(/[\\%_]/g, ch => "\\" + ch);
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    try {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { headers: cors });
+      }
+
+      if (!env.DB) return json({ error: "Database unavailable" }, 503);
+
+      if (path === "/api/health" && request.method === "GET") {
+        await env.DB.prepare("SELECT 1").first();
+        return json({ status: "online", database: "connected", app: "Chatty" });
+      }
+
+      if (path === "/api/config" && request.method === "GET") {
+        // Public read-only endpoint: never run database migrations here.
+        return json({
+          registrationMode: await getRegistrationMode(env),
+          maintenanceMode: (await getSetting(env, "maintenance_mode", "false")) === "true",
+          maintenanceMessage: await getSetting(
+            env, "maintenance_message",
+            "Chatty is temporarily unavailable for maintenance."
+          )
+        });
+      }
+
+      if (path === "/api/update" && request.method === "GET") {
+        // Public read-only endpoint. Schema changes are performed only by
+        // authenticated Owner update-management routes.
+        const update = await env.DB.prepare(`
+          SELECT id, version, release_notes, download_url, force_update, sha256, created_at
+          FROM app_updates ORDER BY id DESC LIMIT 1
+        `).first();
+
+        if (!update) return json({ update: null });
+
+        return json({
+          update: {
+            id: update.id,
+            version: update.version,
+            releaseNotes: update.release_notes,
+            downloadUrl: update.download_url,
+            forceUpdate: Boolean(update.force_update),
+            sha256: update.sha256 || null,
+            publishedAt: update.created_at
+          }
+        });
+      }
+
+      const fileMatch = path.match(/^\/app\/file\/(\d{1,10})$/);
+
+      if (fileMatch && request.method === "GET") {
+        // Public download endpoint: do not run migrations during downloads.
+        const file = await env.DB.prepare(
+          "SELECT html, sha256 FROM app_files WHERE id = ?"
+        ).bind(Number(fileMatch[1])).first();
+
+        if (!file) return json({ error: "File not found" }, 404);
+
+        return new Response(file.html, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="Chatty.html"',
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "ETag": `"${file.sha256}"`
+          }
+        });
+      }
+
+      const maintenanceOn =
+        (await getSetting(env, "maintenance_mode", "false")) === "true";
+
+      if (maintenanceOn && path === "/api/register" && request.method === "POST") {
+        return json({
+          error: await getSetting(
+            env, "maintenance_message",
+            "Chatty is temporarily unavailable for maintenance."
+          ),
+          maintenance: true
+        }, 503);
+      }
+
+      if (maintenanceOn && path.startsWith("/api/") && ![
+        "/api/health", "/api/config", "/api/update",
+        "/api/login", "/api/register", "/api/logout"
+      ].includes(path) && !path.startsWith("/api/admin/")) {
+        const current = await getUser(request, env);
+
+        if (current && !isPrivileged(current)) {
+          return json({
+            error: await getSetting(
+              env, "maintenance_message",
+              "Chatty is temporarily unavailable for maintenance."
+            ),
+            maintenance: true
+          }, 503);
+        }
+      }
+
+      if (path === "/api/register" && request.method === "POST") {
+        if (!(await rateLimit(request, env, "register"))) {
+          return json({ error: "Too many attempts" }, 429);
+        }
+
+        const body = await readBody(request);
+
+        if (!validUsername(body.username) || !validPassword(body.password)) {
+          return json({
+            error: "Username must be 3–20 characters and password 10–128 characters"
+          }, 400);
+        }
+
+        const mode = await getRegistrationMode(env);
+        const maxUsers = await getMaxUsers(env);
+        const id = randomId();
+        const now = Date.now();
+
+        if (mode === "invite_only") {
+          if (typeof body.invite !== "string" || !body.invite.trim()) {
+            return json({ error: "An invite code is required" }, 403);
+          }
+
+          const suppliedCode = body.invite.trim();
+          const normalizedCode = suppliedCode.toUpperCase();
+          const newCodeHash = await hash(normalizedCode);
+          const legacyCodeHash = await hash(suppliedCode);
+
+          const invite = await env.DB.prepare(`
+            SELECT code_hash FROM invites
+            WHERE code_hash IN (?, ?)
+              AND used_by IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)
+            LIMIT 1
+          `).bind(newCodeHash, legacyCodeHash, now).first();
+
+          if (!invite) {
+            return json({ error: "Invalid or already used invite" }, 403);
+          }
+
+          const password = await passwordHash(body.password);
+
+          const results = await env.DB.batch([
+            env.DB.prepare(`
+              INSERT INTO users (id, username, password_hash, role, created_at)
+              SELECT ?, ?, ?, 'user', ?
+              WHERE EXISTS (
+                SELECT 1 FROM invites
+                WHERE code_hash = ? AND used_by IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+              )
+              AND (? = 0 OR (SELECT COUNT(*) FROM users) < ?)
+            `).bind(
+              id, body.username, password, now,
+              invite.code_hash, now, maxUsers, maxUsers
+            ),
+
+            env.DB.prepare(`
+              UPDATE invites SET used_by = ?, used_at = ?
+              WHERE code_hash = ? AND used_by IS NULL
+                AND EXISTS (SELECT 1 FROM users WHERE id = ?)
+            `).bind(id, now, invite.code_hash, id)
+          ]);
+
+          if (!results[0]?.meta?.changes) {
+            const count = await getUserCount(env);
+
+            if (maxUsers > 0 && count >= maxUsers) {
+              return json({ error: "Maximum number of accounts reached" }, 403);
+            }
+
+            return json({ error: "Invite invalid or username already taken" }, 403);
+          }
+        } else {
+          const password = await passwordHash(body.password);
+
+          const result = await env.DB.prepare(`
+            INSERT INTO users (id, username, password_hash, role, created_at)
+            SELECT ?, ?, ?, 'user', ?
+            WHERE ? = 0 OR (SELECT COUNT(*) FROM users) < ?
+          `).bind(id, body.username, password, now, maxUsers, maxUsers).run();
+
+          if (!result.meta?.changes) {
+            return json({ error: "Maximum number of accounts reached" }, 403);
+          }
+        }
+
+        await audit(env, id, "registered");
+        const token = await createSession(env, id);
+
+        return json({
+          success: true,
+          user: publicUser({ id, username: body.username, role: "user" }),
+          token
+        }, 201);
+      }
+
+      if (path === "/api/login" && request.method === "POST") {
+        const body = await readBody(request);
+
+        if (typeof body.username !== "string" ||
+            typeof body.password !== "string" ||
+            body.username.length > 160 ||
+            body.password.length > 128) {
+          return json({ error: "Invalid username or password" }, 400);
+        }
+
+        if (!(await rateLimit(request, env, "login", body.username))) {
+          return json({ error: "Too many attempts. Try again later." }, 429);
+        }
+
+        const user = await env.DB.prepare(`
+          SELECT id, username, password_hash, role
+          FROM users WHERE username = ?
+        `).bind(body.username).first();
+
+        if (!user || !(await verifyPassword(body.password, user.password_hash))) {
+          return json({ error: "Invalid username or password" }, 401);
+        }
+
+        if (storedPasswordIterations(user.password_hash) < ITERATIONS) {
+          const upgradedHash = await passwordHash(body.password);
+
+          await env.DB.prepare(`
+            UPDATE users SET password_hash = ?
+            WHERE id = ? AND password_hash = ?
+          `).bind(upgradedHash, user.id, user.password_hash).run();
+        }
+
+        const ban = await env.DB.prepare("SELECT user_id FROM bans WHERE user_id = ?")
+          .bind(user.id).first();
+
+        if (ban) return json({ error: "Account suspended" }, 403);
+
+        if ((await getSetting(env, "maintenance_mode", "false")) === "true" &&
+            !isPrivileged(user)) {
+          return json({
+            error: await getSetting(
+              env, "maintenance_message",
+              "Chatty is temporarily unavailable for maintenance."
+            ),
+            maintenance: true
+          }, 503);
+        }
+
+        const token = await createSession(env, user.id);
+        return json({ success: true, user: publicUser(user), token });
+      }
+
+      if (path === "/api/me" && request.method === "GET") {
+        const user = await getUser(request, env);
+        return user
+          ? json({ user: publicUser(user) })
+          : json({ error: "Unauthorized" }, 401);
+      }
+
+      if (path === "/api/logout" && request.method === "POST") {
+        const header = request.headers.get("Authorization") || "";
+        const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+
+        if (token) {
+          await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(await hash(token)).run();
+        }
+
+        return json({ success: true });
+      }
+
+      if (path === "/api/users/search" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        if (!(await rateLimit(request, env, "user-search", user.id))) {
+          return json({ error: "Too many searches. Try again later." }, 429);
+        }
+
+        const q = (url.searchParams.get("q") || "").trim();
+        if (q.length < 2 || q.length > 20) return json({ users: [] });
+
+        const result = await env.DB.prepare(`
+          SELECT id, username FROM users
+          WHERE username LIKE ? AND id != ?
+            AND id NOT IN (SELECT user_id FROM bans)
+          ORDER BY username LIMIT 20
+        `).bind(q + "%", user.id).all();
+
+        return json({ users: result.results });
+      }
+
+
+      if (path === "/api/groups" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        if (!(await rateLimit(request, env, "group-create", user.id))) return json({ error: "Too many groups created. Try again later." }, 429);
+        await ensureGroupSchema(env);
+        const body = await readBody(request);
+        const name = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";
+        if (!name || name.length > 60) return json({ error: "Group name must be 1–60 characters" }, 400);
+        const id = randomId();
+        const now = Date.now();
+        await env.DB.batch([
+          env.DB.prepare("INSERT INTO conversations (id, type, direct_key, created_at) VALUES (?, 'group', NULL, ?)").bind(id, now),
+          env.DB.prepare("INSERT INTO group_details (conversation_id, name, created_by, created_at) VALUES (?, ?, ?, ?)").bind(id, name, user.id, now),
+          env.DB.prepare("INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES (?, ?, ?)").bind(id, user.id, now),
+          env.DB.prepare("INSERT INTO group_admins (conversation_id, user_id, assigned_at, assigned_by) VALUES (?, ?, ?, ?)").bind(id, user.id, now, user.id)
+        ]);
+        return json({ success: true, conversationId: id, group: { id, name, created_by: user.id, created_at: now } }, 201);
+      }
+
+      const groupRoute = path.match(/^\/api\/groups\/([A-Za-z0-9_-]{1,100})(?:\/(members|admins|membership))?$/);
+      if (groupRoute) {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureGroupSchema(env);
+        const conversationId = groupRoute[1], action = groupRoute[2] || "";
+        const group = await getGroup(env, conversationId);
+        if (!group || !(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Group not found" }, 404);
+        }
+        if (request.method === "GET" && action === "membership") {
+          return json({ member: true });
+        }
+        if (request.method === "GET" && !action) {
+          const [members, admins] = await Promise.all([
+            env.DB.prepare(`SELECT u.id, u.username, cm.joined_at FROM conversation_members cm
+              JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id = ? ORDER BY cm.joined_at, u.username`).bind(conversationId).all(),
+            env.DB.prepare(`SELECT user_id FROM group_admins WHERE conversation_id = ?`).bind(conversationId).all()
+          ]);
+          return json({ group, members: members.results, admins: admins.results.map(x => x.user_id) });
+        }
+        if (!action || !["members", "admins"].includes(action)) return json({ error: "Invalid group action" }, 404);
+        if (!(await getGroupAdmin(env, conversationId, user.id))) return json({ error: "Group admin access required" }, 403);
+        const body = await readBody(request);
+        const targetId = typeof body.userId === "string" ? body.userId : "";
+        if (!targetId || targetId.length > 100) return json({ error: "Valid user ID required" }, 400);
+        if (action === "members" && request.method === "POST") {
+          if (!(await rateLimit(request, env, "group-member", user.id))) return json({ error: "Too many member changes. Try again later." }, 429);
+          const target = await env.DB.prepare(`SELECT id FROM users WHERE id = ? AND id NOT IN (SELECT user_id FROM bans)`).bind(targetId).first();
+          if (!target) return json({ error: "User not found" }, 404);
+          const inserted = await env.DB.prepare(`
+            INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, joined_at)
+            SELECT ?, ?, ?
+            WHERE (SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ?) < 100
+          `).bind(conversationId, targetId, Date.now(), conversationId).run();
+          if (!inserted.meta?.changes && !(await isConversationMember(env, conversationId, targetId))) {
+            return json({ error: "Groups are limited to 100 members" }, 409);
+          }
+          return json({ success: true });
+        }
+        if (action === "members" && request.method === "DELETE") {
+          if (targetId === group.created_by) return json({ error: "The group creator cannot be removed" }, 400);
+          await ensureTypingSchema(env);
+          const targetIsAdmin = await getGroupAdmin(env, conversationId, targetId);
+          const adminCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_admins WHERE conversation_id = ?").bind(conversationId).first();
+          if (targetIsAdmin && Number(adminCount?.n || 0) <= 1) return json({ error: "Promote another member before removing the last group admin" }, 409);
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM group_admins WHERE conversation_id = ? AND user_id = ?").bind(conversationId, targetId),
+            env.DB.prepare("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?").bind(conversationId, targetId),
+            env.DB.prepare("DELETE FROM typing_status WHERE conversation_id = ? AND user_id = ?").bind(conversationId, targetId)
+          ]);
+          return json({ success: true });
+        }
+        if (action === "admins" && request.method === "POST") {
+          if (!(await isConversationMember(env, conversationId, targetId))) return json({ error: "User must be a group member first" }, 400);
+          await env.DB.prepare(`INSERT OR IGNORE INTO group_admins (conversation_id, user_id, assigned_at, assigned_by) VALUES (?, ?, ?, ?)`).bind(conversationId, targetId, Date.now(), user.id).run();
+          return json({ success: true });
+        }
+        if (action === "admins" && request.method === "DELETE") {
+          if (targetId === group.created_by) return json({ error: "The creator remains a group admin" }, 400);
+          const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_admins WHERE conversation_id = ?").bind(conversationId).first();
+          const exists = await getGroupAdmin(env, conversationId, targetId);
+          if (exists && Number(count?.n || 0) <= 1) return json({ error: "A group must always have an admin" }, 409);
+          await env.DB.prepare("DELETE FROM group_admins WHERE conversation_id = ? AND user_id = ?").bind(conversationId, targetId).run();
+          return json({ success: true });
+        }
+        return json({ error: "Method not allowed" }, 405);
+      }
+
+
+      if (path === "/api/messages/reactions" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureGroupSchema(env);
+        const conversationId = url.searchParams.get("conversationId");
+        if (!conversationId || !(await isConversationMember(env, conversationId, user.id))) return json({ error: "Conversation not found" }, 404);
+        const rows = await env.DB.prepare(`SELECT mr.message_id, mr.user_id, mr.reaction
+          FROM message_reactions mr JOIN messages m ON m.id = mr.message_id
+          WHERE m.conversation_id = ? ORDER BY mr.created_at DESC LIMIT 1000`).bind(conversationId).all();
+        return json({ reactions: rows.results });
+      }
+
+      if (path === "/api/messages/reactions" && (request.method === "POST" || request.method === "DELETE")) {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureGroupSchema(env);
+        const body = await readBody(request);
+        const messageId = Number(body.messageId);
+        const reaction = typeof body.reaction === "string" ? body.reaction : "";
+        const allowed = ["👍","❤️","😂","😮","😢","🎉"];
+        if (!Number.isSafeInteger(messageId) || messageId < 1 || !allowed.includes(reaction)) return json({ error: "Invalid reaction" }, 400);
+        const message = await env.DB.prepare("SELECT conversation_id FROM messages WHERE id = ?").bind(messageId).first();
+        if (!message || !(await isConversationMember(env, message.conversation_id, user.id))) return json({ error: "Message not found" }, 404);
+        if (request.method === "DELETE") {
+          await env.DB.prepare("DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND reaction = ?").bind(messageId, user.id, reaction).run();
+        } else {
+          await env.DB.prepare(`INSERT OR IGNORE INTO message_reactions (message_id, user_id, reaction, created_at) VALUES (?, ?, ?, ?)`).bind(messageId, user.id, reaction, Date.now()).run();
+        }
+        return json({ success: true });
+      }
+
+      if (path === "/api/conversations/direct" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        const body = await readBody(request);
+
+        if (typeof body.userId !== "string" ||
+            body.userId.length < 1 ||
+            body.userId.length > 100 ||
+            body.userId === user.id) {
+          return json({ error: "Invalid user" }, 400);
+        }
+
+        const target = await env.DB.prepare(`
+          SELECT id, username FROM users
+          WHERE id = ? AND id NOT IN (SELECT user_id FROM bans)
+        `).bind(body.userId).first();
+
+        if (!target) return json({ error: "User not found" }, 404);
+
+        const ids = [user.id, target.id].sort();
+        const directKey = ids.join(":");
+        const newId = randomId();
+        const now = Date.now();
+
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO conversations (id, type, direct_key, created_at)
+          VALUES (?, 'direct', ?, ?)
+        `).bind(newId, directKey, now).run();
+
+        const conversation = await env.DB.prepare(
+          "SELECT id FROM conversations WHERE direct_key = ?"
+        ).bind(directKey).first();
+
+        if (!conversation) {
+          return json({ error: "Could not create conversation" }, 500);
+        }
+
+        await env.DB.batch([
+          env.DB.prepare(`
+            INSERT OR IGNORE INTO conversation_members
+              (conversation_id, user_id, joined_at) VALUES (?, ?, ?)
+          `).bind(conversation.id, user.id, now),
+
+          env.DB.prepare(`
+            INSERT OR IGNORE INTO conversation_members
+              (conversation_id, user_id, joined_at) VALUES (?, ?, ?)
+          `).bind(conversation.id, target.id, now)
+        ]);
+
+        return json({
+          success: true,
+          conversationId: conversation.id,
+          user: { id: target.id, username: target.username }
+        }, 201);
+      }
+
+      if (path === "/api/conversations" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        await ensureGroupSchema(env);
+        const result = await env.DB.prepare(`
+          SELECT c.id, c.type, c.created_at,
+            other.id AS other_user_id,
+            other.username AS other_username,
+            gd.name AS group_name,
+            gd.created_by AS group_created_by,
+            (SELECT COUNT(*) FROM conversation_members cmc WHERE cmc.conversation_id = c.id) AS member_count,
+            (SELECT m.body FROM messages m
+              WHERE m.conversation_id = c.id
+              ORDER BY m.id DESC LIMIT 1) AS last_message,
+            (SELECT m.created_at FROM messages m
+              WHERE m.conversation_id = c.id
+              ORDER BY m.id DESC LIMIT 1) AS last_message_at,
+            (SELECT m.sender_id FROM messages m
+              WHERE m.conversation_id = c.id
+              ORDER BY m.id DESC LIMIT 1) AS last_sender_id
+          FROM conversations c
+          JOIN conversation_members mine ON mine.conversation_id = c.id
+          LEFT JOIN conversation_members theirs
+            ON c.type = 'direct' AND theirs.conversation_id = c.id AND theirs.user_id != ?
+          LEFT JOIN users other ON other.id = theirs.user_id
+          LEFT JOIN group_details gd ON gd.conversation_id = c.id
+          WHERE mine.user_id = ?
+          ORDER BY COALESCE(last_message_at, c.created_at) DESC
+          LIMIT 100
+        `).bind(user.id, user.id).all();
+
+        return json({ conversations: result.results });
+      }
+
+      if (path === "/api/messages" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        await ensureGroupSchema(env);
+        const conversationId = url.searchParams.get("conversationId");
+
+        if (!conversationId || conversationId.length > 100) {
+          return json({ error: "Conversation ID required" }, 400);
+        }
+
+        if (!(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Conversation not found" }, 404);
+        }
+
+        const result = await env.DB.prepare(`
+          SELECT m.id, m.sender_id, u.username AS sender_username, m.body, m.created_at,
+            m.reply_to_message_id,
+            (SELECT rm.body FROM messages rm WHERE rm.id = m.reply_to_message_id) AS reply_body,
+            (SELECT ru.username FROM messages rm JOIN users ru ON ru.id = rm.sender_id WHERE rm.id = m.reply_to_message_id) AS reply_sender_username
+          FROM messages m JOIN users u ON u.id = m.sender_id
+          WHERE m.conversation_id = ?
+          ORDER BY m.id DESC LIMIT 50
+        `).bind(conversationId).all();
+
+        return json({ messages: result.results.reverse() });
+      }
+
+      if (path === "/api/messages/send" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        if (!(await rateLimit(request, env, "send-message", user.id))) {
+          return json({ error: "Too many messages. Try again later." }, 429);
+        }
+
+        await ensureGroupSchema(env);
+        const body = await readBody(request, 10000);
+        const conversationId = body.conversationId;
+        const message = typeof body.body === "string" ? body.body.trim() : "";
+
+        if (typeof conversationId !== "string" ||
+            conversationId.length < 1 ||
+            conversationId.length > 100 ||
+            message.length < 1 ||
+            message.length > 2000) {
+          return json({ error: "Invalid message" }, 400);
+        }
+
+        if (!(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Conversation not found" }, 404);
+        }
+
+        const replyTo = body.replyToMessageId == null ? null : Number(body.replyToMessageId);
+        if (replyTo !== null) {
+          if (!Number.isSafeInteger(replyTo) || replyTo < 1) return json({ error: "Invalid reply target" }, 400);
+          const parent = await env.DB.prepare(`
+            SELECT m.conversation_id, m.body, u.username AS sender_username
+            FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.id = ?
+          `).bind(replyTo).first();
+          if (!parent || parent.conversation_id !== conversationId) return json({ error: "Reply target not found in this conversation" }, 404);
+          body._replyPreview = { body: parent.body, sender: parent.sender_username };
+        }
+        const now = Date.now();
+
+        const result = await env.DB.prepare(`
+          INSERT INTO messages (conversation_id, sender_id, body, created_at, reply_to_message_id)
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(conversationId, user.id, message, now, replyTo).run();
+
+        return json({
+          success: true,
+          message: {
+            id: result.meta.last_row_id,
+            sender_id: user.id,
+            sender_username: user.username,
+            body: message,
+            created_at: now,
+            reply_to_message_id: replyTo,
+            reply_body: body._replyPreview?.body || "",
+            reply_sender_username: body._replyPreview?.sender || ""
+          }
+        }, 201);
+      }
+
+      if (path === "/api/messages/read" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        const body = await readBody(request);
+        const conversationId = body.conversationId;
+
+        if (typeof conversationId !== "string" ||
+            conversationId.length < 1 ||
+            conversationId.length > 100) {
+          return json({ error: "Invalid conversation" }, 400);
+        }
+
+        if (!(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Conversation not found" }, 404);
+        }
+
+        await env.DB.prepare(`
+          UPDATE conversation_members SET last_read_at = ?
+          WHERE conversation_id = ? AND user_id = ?
+        `).bind(Date.now(), conversationId, user.id).run();
+
+        return json({ success: true });
+      }
+
+      if (path === "/api/typing" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        await ensureTypingSchema(env);
+
+        const body = await readBody(request);
+        const conversationId = body.conversationId;
+        const typing = body.typing === true;
+
+        if (typeof conversationId !== "string" ||
+            conversationId.length < 1 ||
+            conversationId.length > 100 ||
+            typeof body.typing !== "boolean") {
+          return json({ error: "Invalid typing request" }, 400);
+        }
+
+        if (!(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Conversation not found" }, 404);
+        }
+
+        if (typing) {
+          await env.DB.prepare(`
+            INSERT INTO typing_status (conversation_id, user_id, typing_until)
+            VALUES (?, ?, ?)
+            ON CONFLICT(conversation_id, user_id)
+            DO UPDATE SET typing_until = excluded.typing_until
+          `).bind(conversationId, user.id, Date.now() + 5000).run();
+        } else {
+          await env.DB.prepare(`
+            DELETE FROM typing_status
+            WHERE conversation_id = ? AND user_id = ?
+          `).bind(conversationId, user.id).run();
+        }
+
+        return json({ success: true });
+      }
+
+      if (path === "/api/typing" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+
+        await ensureTypingSchema(env);
+
+        const conversationId = url.searchParams.get("conversationId");
+
+        if (!conversationId || conversationId.length > 100) {
+          return json({ error: "Conversation ID required" }, 400);
+        }
+
+        if (!(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Conversation not found" }, 404);
+        }
+
+        const now = Date.now();
+
+        await env.DB.prepare(`
+          DELETE FROM typing_status
+          WHERE conversation_id = ? AND typing_until <= ?
+        `).bind(conversationId, now).run();
+
+        const result = await env.DB.prepare(`
+          SELECT 1 FROM typing_status
+          WHERE conversation_id = ? AND user_id != ? AND typing_until > ?
+          LIMIT 1
+        `).bind(conversationId, user.id, now).first();
+
+        return json({ typing: Boolean(result) });
+      }
+
+      if (path.startsWith("/api/admin/")) {
+        // Authenticate before any migration or schema-changing operation.
+        const preMigrationAdmin = await adminOnly(request, env);
+        if (!preMigrationAdmin) {
+          return json({ error: "Admin access required" }, 403);
+        }
+
+        // Legacy admins can pass the first check so their roles can be migrated.
+        // Re-read the user after migration before making authorization decisions.
+        await ensureAdminSchema(env);
+
+        const admin = await adminOnly(request, env);
+        if (!admin) return json({ error: "Admin access required" }, 403);
+
+        const owner = ownerOnly(admin);
+
+        if (path === "/api/admin/users" && request.method === "GET") {
+          const q = (url.searchParams.get("q") || "").trim().slice(0, 100);
+          const limit = boundedInt(url.searchParams.get("limit"), 50, 1, 100);
+          const offset = boundedInt(url.searchParams.get("offset"), 0, 0, 10000000);
+          const where = q
+            ? "WHERE u.username LIKE ? ESCAPE '\\' OR u.id LIKE ? ESCAPE '\\'"
+            : "";
+          const pattern = `%${escapeLike(q)}%`;
+
+          const countQuery = `SELECT COUNT(*) AS total FROM users u ${where}`;
+          const count = q
+            ? await env.DB.prepare(countQuery).bind(pattern, pattern).first()
+            : await env.DB.prepare(countQuery).first();
+
+          const query = `
+            SELECT u.id, u.username, u.role, u.created_at,
+              CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END AS banned
+            FROM users u LEFT JOIN bans b ON b.user_id = u.id
+            ${where}
+            ORDER BY u.created_at DESC LIMIT ? OFFSET ?
+          `;
+
+          const result = q
+            ? await env.DB.prepare(query).bind(pattern, pattern, limit, offset).all()
+            : await env.DB.prepare(query).bind(limit, offset).all();
+
+          return json({
+            users: result.results,
+            total: Number(count?.total || 0),
+            limit,
+            offset
+          });
+        }
+
+        if (path === "/api/admin/users/create" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (!validUsername(body.username) || !validPassword(body.password)) {
+            return json({
+              error: "Username must be 3–20 characters and password 10–128 characters"
+            }, 400);
+          }
+
+          const maxUsers = await getMaxUsers(env);
+          const count = await getUserCount(env);
+
+          if (maxUsers > 0 && count >= maxUsers) {
+            return json({ error: "Maximum number of accounts reached" }, 403);
+          }
+
+          const id = randomId();
+          const now = Date.now();
+          const pass = await passwordHash(body.password);
+
+          await env.DB.prepare(`
+            INSERT INTO users (id, username, password_hash, role, created_at)
+            VALUES (?, ?, ?, 'user', ?)
+          `).bind(id, body.username, pass, now).run();
+
+          await audit(env, admin.id, "admin_created_user", id);
+
+          return json({
+            success: true,
+            user: { id, username: body.username, role: "user", created_at: now }
+          }, 201);
+        }
+
+        if (path === "/api/admin/users/reset-password" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (typeof body.userId !== "string" || !validPassword(body.newPassword)) {
+            return json({
+              error: "A valid userId and new password (10–128 characters) are required"
+            }, 400);
+          }
+
+          const target = await env.DB.prepare("SELECT id, role FROM users WHERE id = ?")
+            .bind(body.userId).first();
+
+          if (!target || target.role !== "user") {
+            return json({ error: "Only regular user accounts can be reset here" }, 400);
+          }
+
+          const pass = await passwordHash(body.newPassword);
+
+          await env.DB.batch([
+            env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?")
+              .bind(pass, target.id),
+            env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+              .bind(target.id)
+          ]);
+
+          await audit(env, admin.id, "user_password_reset", target.id);
+          return json({ success: true, sessionsRevoked: true });
+        }
+
+        if (path === "/api/admin/sessions" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const userId = url.searchParams.get("userId") || "";
+          if (!userId || userId.length > 100) {
+            return json({ error: "A valid userId is required" }, 400);
+          }
+
+          const target = await env.DB.prepare(
+            "SELECT id, username, role FROM users WHERE id = ?"
+          ).bind(userId).first();
+
+          if (!target || target.role !== "user") {
+            return json({ error: "Only regular user accounts can be inspected" }, 400);
+          }
+
+          const result = await env.DB.prepare(`
+            SELECT expires_at FROM sessions
+            WHERE user_id = ? AND expires_at > ?
+            ORDER BY expires_at DESC
+          `).bind(userId, Date.now()).all();
+
+          return json({
+            user: { id: target.id, username: target.username },
+            sessions: result.results,
+            count: result.results.length
+          });
+        }
+
+        if (path === "/api/admin/sessions/revoke" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (typeof body.userId !== "string" || body.userId.length > 100) {
+            return json({ error: "Invalid userId" }, 400);
+          }
+
+          const target = await env.DB.prepare("SELECT id, role FROM users WHERE id = ?")
+            .bind(body.userId).first();
+
+          if (!target || target.role !== "user") {
+            return json({ error: "Only regular user sessions can be revoked here" }, 400);
+          }
+
+          const result = await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+            .bind(target.id).run();
+
+          await audit(env, admin.id, "user_sessions_revoked", target.id);
+
+          return json({ success: true, revoked: result.meta?.changes || 0 });
+        }
+
+        if (path === "/api/admin/invites" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const result = await env.DB.prepare(`
+            SELECT i.id, i.created_at, i.expires_at,
+              u.username AS created_by_username,
+              CASE WHEN i.expires_at IS NOT NULL AND i.expires_at <= ? THEN 1 ELSE 0 END AS expired
+            FROM invites i LEFT JOIN users u ON u.id = i.created_by
+            WHERE i.used_by IS NULL
+            ORDER BY i.created_at DESC LIMIT 200
+          `).bind(Date.now()).all();
+
+          return json({ invites: result.results });
+        }
+
+        if (path === "/api/admin/invites" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          let code, inserted = false;
+
+          for (let attempt = 0; attempt < 5; attempt++) {
+            code = randomInviteCode();
+            const now = Date.now();
+
+            try {
+              await env.DB.prepare(`
+                INSERT INTO invites (id, code_hash, created_by, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+              `).bind(randomId(16), await hash(code), admin.id, now, now + 7 * 86400000).run();
+
+              inserted = true;
+              break;
+            } catch (error) {
+              if (!error.message?.includes("UNIQUE constraint failed")) throw error;
+            }
+          }
+
+          if (!inserted) {
+            return json({ error: "Could not generate invite. Try again." }, 500);
+          }
+
+          await audit(env, admin.id, "invite_created");
+          return json({ success: true, invite: code, expiresInDays: 7 }, 201);
+        }
+
+        if (path === "/api/admin/invites/revoke" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (typeof body.inviteId !== "string" || body.inviteId.length > 100) {
+            return json({ error: "Invalid inviteId" }, 400);
+          }
+
+          const result = await env.DB.prepare(`
+            DELETE FROM invites WHERE id = ? AND used_by IS NULL
+          `).bind(body.inviteId).run();
+
+          if (!result.meta?.changes) {
+            return json({ error: "Unused invite not found" }, 404);
+          }
+
+          await audit(env, admin.id, "invite_revoked", body.inviteId);
+          return json({ success: true });
+        }
+
+        if (path === "/api/admin/registration-mode" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (!["invite_only", "open"].includes(body.mode)) {
+            return json({ error: "Mode must be invite_only or open" }, 400);
+          }
+
+          await setSetting(env, "registration_mode", body.mode);
+          await audit(env, admin.id, "registration_mode_changed");
+
+          return json({ success: true, mode: body.mode });
+        }
+
+        if (path === "/api/admin/security-limits" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const limits = {
+            register: await getRateLimitValue(env, "register"),
+            login: await getRateLimitValue(env, "login"),
+            userSearch: await getRateLimitValue(env, "user-search"),
+            sendMessage: await getRateLimitValue(env, "send-message")
+          };
+
+          return json({
+            limits,
+            windowMinutes: 15,
+            bounds: {
+              register: { min: 1, max: 20, default: 8 },
+              login: { min: 1, max: 30, default: 10 },
+              userSearch: { min: 1, max: 120, default: 30 },
+              sendMessage: { min: 10, max: 240, default: 60 }
+            }
+          });
+        }
+
+        if (path === "/api/admin/security-limits" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+          const supplied = body?.limits;
+
+          if (!supplied || typeof supplied !== "object" || Array.isArray(supplied)) {
+            return json({
+              error: "limits must be an object containing one or more supported limits"
+            }, 400);
+          }
+
+          const mapping = {
+            register: { key: "register", min: 1, max: 20 },
+            login: { key: "login", min: 1, max: 30 },
+            userSearch: { key: "user-search", min: 1, max: 120 },
+            sendMessage: { key: "send-message", min: 10, max: 240 }
+          };
+
+          const keys = Object.keys(supplied);
+
+          if (!keys.length ||
+              keys.some(key => !Object.prototype.hasOwnProperty.call(mapping, key))) {
+            return json({
+              error: "Provide at least one supported limit: register, login, userSearch, sendMessage"
+            }, 400);
+          }
+
+          for (const key of keys) {
+            const value = supplied[key], rule = mapping[key];
+
+            if (!Number.isInteger(value) || value < rule.min || value > rule.max) {
+              return json({
+                error: `${key} must be a whole number from ${rule.min} to ${rule.max}`
+              }, 400);
+            }
+          }
+
+          const statements = keys.map(key => env.DB.prepare(`
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          `).bind(`rate_limit_${mapping[key].key}`, String(supplied[key])));
+
+          await env.DB.batch(statements);
+          await audit(
+            env, admin.id, "security_rate_limits_changed",
+            JSON.stringify(supplied).slice(0, 300)
+          );
+
+          return json({
+            success: true,
+            limits: {
+              register: await getRateLimitValue(env, "register"),
+              login: await getRateLimitValue(env, "login"),
+              userSearch: await getRateLimitValue(env, "user-search"),
+              sendMessage: await getRateLimitValue(env, "send-message")
+            },
+            windowMinutes: 15
+          });
+        }
+
+        if (path === "/api/admin/user-limit" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const maxUsers = await getMaxUsers(env);
+          const userCount = await getUserCount(env);
+
+          return json({ maxUsers, userCount, unlimited: maxUsers === 0 });
+        }
+
+        if (path === "/api/admin/user-limit" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+          const maxUsers = body.maxUsers;
+
+          if (!Number.isInteger(maxUsers) || maxUsers < 0 || maxUsers > 1000000) {
+            return json({
+              error: "Maximum users must be a whole number from 0 to 1,000,000"
+            }, 400);
+          }
+
+          const userCount = await getUserCount(env);
+
+          if (maxUsers > 0 && maxUsers < userCount) {
+            return json({
+              error: `There are already ${userCount} accounts. The limit cannot be lower than the current account count.`,
+              userCount
+            }, 400);
+          }
+
+          await setSetting(env, "max_users", maxUsers);
+          await audit(env, admin.id, "maximum_users_changed", String(maxUsers));
+
+          return json({ success: true, maxUsers, userCount, unlimited: maxUsers === 0 });
+        }
+
+        if (path === "/api/admin/maintenance" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          return json({
+            enabled: (await getSetting(env, "maintenance_mode", "false")) === "true",
+            message: await getSetting(
+              env, "maintenance_message",
+              "Chatty is temporarily unavailable for maintenance."
+            )
+          });
+        }
+
+        if (path === "/api/admin/maintenance" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (typeof body.enabled !== "boolean") {
+            return json({ error: "enabled must be true or false" }, 400);
+          }
+
+          const message = body.message === undefined
+            ? await getSetting(
+                env, "maintenance_message",
+                "Chatty is temporarily unavailable for maintenance."
+              )
+            : body.message;
+
+          if (typeof message !== "string" || message.length > 300) {
+            return json({ error: "Maintenance message must be 300 characters or fewer" }, 400);
+          }
+
+          await env.DB.batch([
+            env.DB.prepare(`
+              INSERT INTO app_settings (key, value)
+              VALUES ('maintenance_mode', ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            `).bind(String(body.enabled)),
+
+            env.DB.prepare(`
+              INSERT INTO app_settings (key, value)
+              VALUES ('maintenance_message', ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            `).bind(message)
+          ]);
+
+          await audit(
+            env, admin.id,
+            body.enabled ? "maintenance_enabled" : "maintenance_disabled"
+          );
+
+          return json({ success: true, enabled: body.enabled, message });
+        }
+
+        if (path === "/api/admin/roles" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const result = await env.DB.prepare(`
+            SELECT id, username, role, created_at FROM users
+            WHERE role IN ('owner', 'moderator')
+            ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, username
+          `).all();
+
+          return json({ administrators: result.results });
+        }
+
+        if (path === "/api/admin/roles" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const body = await readBody(request);
+
+          if (typeof body.userId !== "string" ||
+              !["user", "moderator"].includes(body.role)) {
+            return json({
+              error: "Choose a valid user and role (user or moderator)"
+            }, 400);
+          }
+
+          if (body.userId === admin.id) {
+            return json({ error: "You cannot change your own owner role" }, 400);
+          }
+
+          const target = await env.DB.prepare(
+            "SELECT id, role FROM users WHERE id = ?"
+          ).bind(body.userId).first();
+
+          if (!target || target.role === "owner") {
+            return json({
+              error: "User not found or owner role cannot be changed here"
+            }, 400);
+          }
+
+          if (target.role === body.role) {
+            return json({ success: true, role: target.role, unchanged: true });
+          }
+
+          await env.DB.prepare("UPDATE users SET role = ? WHERE id = ?")
+            .bind(body.role, target.id).run();
+
+          await audit(
+            env, admin.id,
+            body.role === "moderator" ? "moderator_promoted" : "moderator_demoted",
+            target.id
+          );
+
+          return json({ success: true, userId: target.id, role: body.role });
+        }
+
+        if (path === "/api/admin/ban" && request.method === "POST") {
+          const body = await readBody(request);
+
+          if (typeof body.userId !== "string" || body.userId === admin.id) {
+            return json({ error: "Invalid target" }, 400);
+          }
+
+          const target = await env.DB.prepare(
+            "SELECT id, role FROM users WHERE id = ?"
+          ).bind(body.userId).first();
+
+          if (!target || target.role !== "user") {
+            return json({ error: "Target not found or cannot be banned" }, 400);
+          }
+
+          await env.DB.prepare(`
+            INSERT OR REPLACE INTO bans (user_id, reason, created_at)
+            VALUES (?, ?, ?)
+          `).bind(
+            body.userId,
+            String(body.reason || "No reason provided").slice(0, 300),
+            Date.now()
+          ).run();
+
+          await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+            .bind(body.userId).run();
+
+          await audit(env, admin.id, "user_banned", body.userId);
+          return json({ success: true });
+        }
+
+        if (path === "/api/admin/unban" && request.method === "POST") {
+          const body = await readBody(request);
+
+          if (typeof body.userId !== "string") {
+            return json({ error: "Invalid user ID" }, 400);
+          }
+
+          const target = await env.DB.prepare(
+            "SELECT id, role FROM users WHERE id = ?"
+          ).bind(body.userId).first();
+
+          if (!target || target.role !== "user") {
+            return json({ error: "Target not found or cannot be unbanned" }, 400);
+          }
+
+          await env.DB.prepare("DELETE FROM bans WHERE user_id = ?")
+            .bind(body.userId).run();
+
+          await audit(env, admin.id, "user_unbanned", body.userId);
+          return json({ success: true });
+        }
+
+        if (path === "/api/admin/audit-logs" && request.method === "GET") {
+          const limit = boundedInt(url.searchParams.get("limit"), 100, 1, 200);
+
+          const result = await env.DB.prepare(`
+            SELECT a.id, a.action, a.target_id, a.created_at,
+              u.username AS actor_username
+            FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+            ORDER BY a.id DESC LIMIT ?
+          `).bind(limit).all();
+
+          return json({ logs: result.results, limit });
+        }
+
+        if (path === "/api/admin/stats" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          const [users, banned, sessions, invites, latest] = await Promise.all([
+            env.DB.prepare("SELECT COUNT(*) AS n FROM users").first(),
+            env.DB.prepare("SELECT COUNT(*) AS n FROM bans").first(),
+            env.DB.prepare("SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?")
+              .bind(Date.now()).first(),
+            env.DB.prepare(`
+              SELECT COUNT(*) AS n FROM invites
+              WHERE used_by IS NULL AND (expires_at IS NULL OR expires_at > ?)
+            `).bind(Date.now()).first(),
+            env.DB.prepare(`
+              SELECT version, created_at FROM app_updates
+              ORDER BY id DESC LIMIT 1
+            `).first()
+          ]);
+
+          return json({
+            users: Number(users?.n || 0),
+            bannedUsers: Number(banned?.n || 0),
+            activeSessions: Number(sessions?.n || 0),
+            unusedInvites: Number(invites?.n || 0),
+            latestUpdate: latest || null
+          });
+        }
+
+        if (path === "/api/admin/update" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          await ensureSchema(env);
+          const body = await readBody(request, 2000000);
+
+          if (body.version !== "auto" &&
+              (typeof body.version !== "string" || !/^[a-zA-Z0-9._-]{1,32}$/.test(body.version))) {
+            return json({ error: "Invalid version" }, 400);
+          }
+
+          if (typeof body.releaseNotes !== "string" || body.releaseNotes.length > 2000) {
+            return json({ error: "Release notes must be under 2000 characters" }, 400);
+          }
+
+          if (body.forceUpdate !== undefined && typeof body.forceUpdate !== "boolean") {
+            return json({ error: "forceUpdate must be true or false" }, 400);
+          }
+
+          const now = Date.now();
+          const force = body.forceUpdate ? 1 : 0;
+          const autoVersionRequested = body.version === "auto";
+
+          if (typeof body.html === "string") {
+            if (!body.html.includes(APP_MARKER)) {
+              return json({ error: "That file does not look like a Chatty app file" }, 400);
+            }
+
+            const declared = body.html.match(/const APP_VERSION = ['"]([^'"]{1,32})['"]/);
+            if (!declared) return json({ error: "The uploaded file has no APP_VERSION declaration" }, 400);
+            if (autoVersionRequested && !/^\d+\.\d+\.\d+(?:[-_.].*)?$/.test(declared[1])) {
+              return json({ error: "The uploaded file has an invalid APP_VERSION; use major.minor.patch format" }, 400);
+            }
+
+            const versionRows = await env.DB.prepare("SELECT version FROM app_updates").all();
+            let highestPublishedVersion = null;
+            for (const row of versionRows.results || []) {
+              if (typeof row.version === "string" &&
+                  (!highestPublishedVersion || compareVersions(row.version, highestPublishedVersion) > 0)) {
+                highestPublishedVersion = row.version;
+              }
+            }
+
+            if (autoVersionRequested) {
+              const baseVersion = highestPublishedVersion && compareVersions(highestPublishedVersion, declared[1]) > 0
+                ? highestPublishedVersion
+                : declared[1];
+              body.version = nextPatchVersion(baseVersion);
+            }
+
+            body.html = body.html.replace(/const APP_VERSION = ['"][^'"]{1,32}['"];?/, `const APP_VERSION = '${body.version}';`);
+            const releaseDate = new Date(now).toISOString().slice(0, 10);
+            if (/const APP_RELEASE_DATE = ['"][^'"]*['"]/.test(body.html)) {
+              body.html = body.html.replace(/const APP_RELEASE_DATE = ['"][^'"]*['"];/, `const APP_RELEASE_DATE = '${releaseDate}';`);
+            } else {
+              body.html = body.html.replace(/(const APP_VERSION = '[^']+';)/, `$1\nconst APP_RELEASE_DATE = '${releaseDate}';`);
+            }
+            body.html = body.html.replace(/<title>Chatty v[^<]*<\/title>/i, `<title>Chatty v${body.version} · ${releaseDate}</title>`);
+
+            if (highestPublishedVersion && compareVersions(body.version, highestPublishedVersion) <= 0) {
+              return json({
+                error: `Version must be higher than the highest previously published version ${highestPublishedVersion}. To go back to an older version, use Republish in the update history.`
+              }, 400);
+            }
+
+            // Hash the exact HTML stored and served, after version/date stamping.
+            const bytes = new TextEncoder().encode(body.html);
+            if (bytes.length > MAX_APP_BYTES) {
+              return json({ error: "The stamped app file is too large" }, 413);
+            }
+            const sha = await sha256Hex(bytes);
+            const prefix = `${url.origin}/app/file/`;
+
+            await env.DB.batch([
+              env.DB.prepare(`
+                INSERT INTO app_files (version, sha256, html, created_at)
+                VALUES (?, ?, ?, ?)
+              `).bind(body.version, sha, body.html, now),
+
+              env.DB.prepare(`
+                INSERT INTO app_updates (
+                  version, release_notes, download_url, force_update,
+                  published_by, created_at, sha256, file_id
+                )
+                VALUES (?, ?, ? || last_insert_rowid(), ?, ?, ?, ?, last_insert_rowid())
+              `).bind(
+                body.version, body.releaseNotes, prefix,
+                force, admin.id, now, sha
+              )
+            ]);
+
+            await audit(env, admin.id, "update_published", body.version);
+
+            return json({
+              success: true,
+              version: body.version,
+              sha256: sha,
+              publishedAt: now
+            }, 201);
+          }
+
+          if (autoVersionRequested) {
+            return json({ error: "Automatic versioning requires uploading the Chatty HTML file" }, 400);
+          }
+          if (typeof body.downloadUrl !== "string" || body.downloadUrl.length > 2048) {
+            return json({ error: "Send the app file, or a valid download URL" }, 400);
+          }
+
+          let downloadUrl;
+
+          try {
+            downloadUrl = new URL(body.downloadUrl);
+          } catch {
+            return json({ error: "Invalid download URL" }, 400);
+          }
+
+          if (downloadUrl.protocol !== "https:") {
+            return json({ error: "Download URL must use HTTPS" }, 400);
+          }
+
+          const legacySha =
+            typeof body.sha256 === "string" && /^[a-f0-9]{64}$/.test(body.sha256)
+              ? body.sha256
+              : null;
+
+          await env.DB.prepare(`
+            INSERT INTO app_updates (
+              version, release_notes, download_url, force_update,
+              published_by, created_at, sha256, file_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+          `).bind(
+            body.version, body.releaseNotes, downloadUrl.href,
+            force, admin.id, now, legacySha
+          ).run();
+
+          await audit(env, admin.id, "update_published", body.version);
+
+          return json({ success: true, version: body.version, publishedAt: now }, 201);
+        }
+
+        if (path === "/api/admin/updates" && request.method === "GET") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          await ensureSchema(env);
+
+          const result = await env.DB.prepare(`
+            SELECT id, version, release_notes, download_url, force_update,
+              published_by, created_at, sha256, file_id
+            FROM app_updates ORDER BY id DESC LIMIT 50
+          `).all();
+
+          return json({ updates: result.results });
+        }
+
+        if (path === "/api/admin/update/rollback" && request.method === "POST") {
+          if (!owner) return json({ error: "Owner access required" }, 403);
+
+          await ensureSchema(env);
+
+          const body = await readBody(request);
+          const updateId = Number(body.updateId);
+
+          if (!Number.isInteger(updateId) || updateId < 1) {
+            return json({ error: "Invalid update ID" }, 400);
+          }
+
+          const previous = await env.DB.prepare(`
+            SELECT version, release_notes, download_url, force_update, sha256, file_id
+            FROM app_updates WHERE id = ?
+          `).bind(updateId).first();
+
+          if (!previous) return json({ error: "Update not found" }, 404);
+
+          if (previous.file_id) {
+            const file = await env.DB.prepare(
+              "SELECT sha256 FROM app_files WHERE id = ?"
+            ).bind(previous.file_id).first();
+
+            if (!file || !previous.sha256 || file.sha256 !== previous.sha256) {
+              return json({
+                error: "The stored app file is missing or its checksum does not match; rollback was stopped"
+              }, 409);
+            }
+          }
+
+          const now = Date.now();
+
+          await env.DB.prepare(`
+            INSERT INTO app_updates (
+              version, release_notes, download_url, force_update,
+              published_by, created_at, sha256, file_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(
+            previous.version,
+            `Rollback: ${previous.release_notes || ""}`.slice(0, 2000),
+            previous.download_url,
+            previous.force_update,
+            admin.id,
+            now,
+            previous.sha256,
+            previous.file_id
+          ).run();
+
+          await audit(env, admin.id, "update_rollback", String(updateId));
+
+          return json({
+            success: true,
+            version: previous.version,
+            rolledBackFrom: updateId
+          }, 201);
+        }
+
+        return json({ error: "Admin endpoint not found" }, 404);
+      }
+
+      return json({ error: "Endpoint not found" }, 404);
+    } catch (error) {
+      console.error("Chatty Worker error:", error);
+
+      if (error.message?.includes("Request too large")) {
+        return json({ error: "Request too large" }, 413);
+      }
+
+      if (error.message?.includes("Invalid JSON body") ||
+          error.message?.includes("Invalid request length")) {
+        return json({ error: "Invalid JSON request body" }, 400);
+      }
+
+      if (error.message?.includes("UNIQUE constraint failed")) {
+        return json({ error: "Username already taken" }, 409);
+      }
+
+      return json({ error: "Internal server error" }, 500);
+    }
+  }
+};
