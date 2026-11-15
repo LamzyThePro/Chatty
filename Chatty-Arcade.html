@@ -2269,10 +2269,10 @@ async function arcMigrateLegacyGames(remoteGames) {
     try {
       const rec = await arcTx('readonly', (gs, fs) => fs.get(local.id));
       if (!rec || !rec.blob) continue;
-      const form = new FormData();
-      form.append('name', String(local.name || 'Imported game').slice(0, 40));
-      form.append('file', rec.blob, 'legacy-game.html');
-      await api('/api/arcade/upload', { method: 'POST', body: form });
+      const gameName = String(local.name || 'Imported game').slice(0, 40);
+      await api('/api/arcade/upload?name=' + encodeURIComponent(gameName) + '&filename=legacy-game.html', {
+        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: rec.blob
+      });
     } catch (e) {
       if ($('arcadeStatus')) $('arcadeStatus').textContent = 'Could not import an older local game: ' + e.message;
       break;
@@ -2325,10 +2325,9 @@ $('arcadeAdd').addEventListener('click', async () => {
   const name = ($('arcadeName').value.trim() || f.name.replace(/\.html?$/i, '')).slice(0, 40);
   $('arcadeAdd').disabled = true; st.textContent = 'Uploading ' + arcSize(f.size) + ' to the shared Arcade… Keep this tab open.';
   try {
-    const form = new FormData();
-    form.append('name', name);
-    form.append('file', f, f.name);
-    await api('/api/arcade/upload', { method: 'POST', body: form });
+    await api('/api/arcade/upload?name=' + encodeURIComponent(name) + '&filename=' + encodeURIComponent(f.name), {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f
+    });
     st.textContent = 'Uploaded “' + name + '”. It is now available to all Chatty users.';
     $('arcadeFile').value = ''; $('arcadeName').value = '';
     await renderArcade();
