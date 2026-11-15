@@ -2215,6 +2215,10 @@ export default {
     } catch (error) {
       console.error("Chatty Worker error:", error);
 
+      if (error.message?.includes("Arcade game exceeds the 95 MB limit")) {
+        return json({ error: "Game files must be 95 MB or smaller." }, 413);
+      }
+
       if (error.message?.includes("Request too large")) {
         return json({ error: "Request too large" }, 413);
       }
