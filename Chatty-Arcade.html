@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="application-name" content="Chatty">
-<title>Chatty v1.0.20 · 2026-11-15</title>
+<title>Chatty v1.0.21 · 2026-11-15</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23128c7e'/%3E%3Cpath d='M32 13c-11 0-20 7.700-20 17.500 0 5 2.300 9.500 6 12.600L16.500 51l8-3.800c2.300.7 4.700 1.100 7.500 1.100 11 0 20-7.800 20-17.500S43 13 32 13z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -371,11 +371,10 @@ dialog::backdrop{backdrop-filter:blur(5px)}
   </div>
   <div class="sec owner-only" id="ownerUpdateHistory"><b>Update history</b><button class="btn ghost" id="refreshUpdates">Refresh history</button><div id="adminUpdates"></div></div>
   <div class="sec owner-only" id="ownerArcade"><b>Arcade games</b>
-    <p>Add a game from an HTML file. It is saved in this browser only (not on the server), so add it on each device where you want it. Anyone using this browser's Chatty can play it from the Arcade button.</p>
+    <p>Upload a game once and it appears in every signed-in user's Arcade. Only the Owner can upload or remove games.</p>
     <input type="file" id="arcadeFile" accept=".html,text/html" style="display:block;width:100%;margin:8px 0">
     <input type="text" id="arcadeName" maxlength="40" placeholder="Game name (optional)" autocomplete="off">
-    <label class="opt"><input type="checkbox" id="arcadeTrusted"> Trusted game (lets it save progress; only tick this for games you fully trust, because a trusted game can read Chatty's data on this device)</label>
-    <div class="acts" style="justify-content:flex-start;align-items:center"><button class="btn" id="arcadeAdd" type="button">Add game</button><span id="arcadeStatus" class="note" role="status" style="padding:6px"></span></div>
+    <div class="acts" style="justify-content:flex-start;align-items:center"><button class="btn" id="arcadeAdd" type="button">Upload game to everyone</button><span id="arcadeStatus" class="note" role="status" style="padding:6px"></span></div>
     <div id="arcadeAdminList"></div>
   </div>
   <div class="acts"><button class="btn" id="closeAdmin">Close</button></div>
@@ -440,7 +439,7 @@ const PEER_OPTS = Object.assign({ debug: 0, config: { iceServers: [
 
 /* ---------- storage (debounced) ---------- */
 const LS = 'chatty1:';
-const APP_VERSION = '1.0.20';
+const APP_VERSION = '1.0.21';
 const APP_RELEASE_DATE = '2026-11-15';
 $('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');
 const API_BASE = 'https://chatty.yeshas-sujith.workers.dev';
@@ -2128,14 +2127,14 @@ $('chattyUpdateInstall').addEventListener('click', downloadChattyUpdate);
 $('chattyForcedInstall').addEventListener('click', downloadChattyUpdate);
 $('chattyUpdateLater').addEventListener('click', () => { $('chattyUpdateNotice').hidden = true; });
 
-/* ---------- Chatty Arcade: games kept on this device ---------- */
+/* ---------- Chatty Arcade: shared library ---------- */
 const ARC_DB = 'chatty-arcade';
 function arcOpen() {
   return new Promise((res, rej) => {
     const r = indexedDB.open(ARC_DB, 1);
     r.onupgradeneeded = () => { for (const s of ['games', 'files']) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s, { keyPath: 'id' }); };
     r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error || new Error('Could not open game storage'));
+    r.onerror = () => rej(r.error || new Error('Could not open local game storage'));
   });
 }
 async function arcTx(mode, fn) {
@@ -2145,58 +2144,98 @@ async function arcTx(mode, fn) {
       const tx = db.transaction(['games', 'files'], mode); let out;
       try { out = fn(tx.objectStore('games'), tx.objectStore('files')); } catch (e) { try { tx.abort(); } catch (_) {} rej(e); return; }
       tx.oncomplete = () => res(out && out.result);
-      tx.onerror = () => rej(tx.error || new Error('Storage error'));
-      tx.onabort = () => rej(tx.error || new Error('Not enough storage space, or the browser blocked it'));
+      tx.onerror = () => rej(tx.error || new Error('Local storage error'));
+      tx.onabort = () => rej(tx.error || new Error('Local storage was blocked'));
     });
   } finally { db.close(); }
 }
-const arcList = async () => ((await arcTx('readonly', g => g.getAll())) || []).sort((a, b) => a.added - b.added);
+const arcLocalList = async () => ((await arcTx('readonly', g => g.getAll())) || []).sort((a, b) => a.added - b.added);
 function arcSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(n >= 104857600 ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
 function arcEl(tag, text, cls) { const e = document.createElement(tag); if (text != null) e.textContent = String(text); if (cls) e.className = cls; return e; }
-let arcUrl = null, arcGames = [];
+let arcUrl = null, arcGames = [], arcLegacyMigrationAttempted = false;
 function arcStop() {
   const fr = $('arcadeFrame'); fr.src = 'about:blank';
   if (arcUrl) { URL.revokeObjectURL(arcUrl); arcUrl = null; }
   $('arcadeStage').hidden = true;
 }
+async function arcFetchGame(id) {
+  const response = await fetch(API_BASE + '/api/arcade/' + encodeURIComponent(id), {
+    method: 'GET', headers: authToken ? { Authorization: 'Bearer ' + authToken } : {}, cache: 'no-store'
+  });
+  if (!response.ok) {
+    let message = 'Could not download game (' + response.status + ')';
+    try { const data = await response.json(); if (data.error) message = data.error; } catch (_) {}
+    throw new Error(message);
+  }
+  return await response.text();
+}
 async function arcPlay(g) {
-  let rec;
-  try { rec = await arcTx('readonly', (gs, fs) => fs.get(g.id)); } catch (e) { toast('Could not open that game: ' + e.message); return; }
-  if (!rec || !rec.blob) { toast('That game’s file is missing. Remove it and add it again.'); return; }
-  arcStop();
-  arcUrl = URL.createObjectURL(rec.blob);
-  const fr = $('arcadeFrame');
-  fr.setAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-forms allow-modals allow-popups' + (g.trusted ? ' allow-same-origin' : ''));
-  fr.setAttribute('allow', 'fullscreen; autoplay; gamepad');
-  fr.src = arcUrl;
-  $('arcadeTitle').textContent = g.name;
-  $('arcadeStage').hidden = false;
-  if ($('arcadeDlg').open) $('arcadeDlg').close();
+  try {
+    const source = await arcFetchGame(g.id);
+    arcStop();
+    arcUrl = URL.createObjectURL(new Blob([source], { type: 'text/html;charset=utf-8' }));
+    const fr = $('arcadeFrame');
+    fr.setAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-forms allow-modals');
+    fr.setAttribute('allow', 'fullscreen; autoplay; gamepad');
+    fr.src = arcUrl;
+    $('arcadeTitle').textContent = g.name;
+    $('arcadeStage').hidden = false;
+    if ($('arcadeDlg').open) $('arcadeDlg').close();
+  } catch (e) { toast('Could not open that game: ' + e.message); }
 }
 async function arcRemove(g) {
-  if (!confirm('Remove “' + g.name + '” from the Arcade on this device?')) return;
-  try { await arcTx('readwrite', (gs, fs) => { gs.delete(g.id); return fs.delete(g.id); }); toast('Removed ' + g.name); }
-  catch (e) { toast('Could not remove it: ' + e.message); }
-  renderArcade();
+  if (!confirm('Remove “' + g.name + '” from the shared Arcade for everyone?')) return;
+  try {
+    await api('/api/arcade/' + encodeURIComponent(g.id), { method: 'DELETE' });
+    toast('Removed ' + g.name + ' for everyone');
+    await renderArcade();
+  } catch (e) { toast('Could not remove it: ' + e.message); }
+}
+async function arcMigrateLegacyGames(remoteGames) {
+  if (arcLegacyMigrationAttempted || !isChattyOwner()) return remoteGames;
+  arcLegacyMigrationAttempted = true;
+  let localGames = [];
+  try { localGames = await arcLocalList(); } catch (_) { return remoteGames; }
+  for (const local of localGames) {
+    if (remoteGames.some(g => g.name.toLowerCase() === String(local.name || '').toLowerCase() && Number(g.size) === Number(local.size))) continue;
+    try {
+      const rec = await arcTx('readonly', (gs, fs) => fs.get(local.id));
+      if (!rec || !rec.blob) continue;
+      const source = await rec.blob.text();
+      await api('/api/arcade/upload', { method: 'POST', body: JSON.stringify({ name: String(local.name || 'Imported game').slice(0, 40), html: source }) });
+    } catch (e) {
+      if ($('arcadeStatus')) $('arcadeStatus').textContent = 'Could not import an older local game: ' + e.message;
+      break;
+    }
+  }
+  try { return (await api('/api/arcade')).games || []; } catch (_) { return remoteGames; }
 }
 async function renderArcade() {
-  try { arcGames = await arcList(); } catch (e) { arcGames = []; if ($('arcadeStatus')) $('arcadeStatus').textContent = 'Game storage is unavailable in this browser.'; }
   const grid = $('arcadeList'), adm = $('arcadeAdminList');
   grid.replaceChildren(); adm.replaceChildren();
-  if (!arcGames.length) {
-    grid.appendChild(arcEl('div', 'No games on this device yet. An admin can add one from Settings → Admin Panel → Arcade games.', 'note'));
-    adm.appendChild(arcEl('div', 'No games added yet.', 'note'));
+  try {
+    const data = await api('/api/arcade');
+    arcGames = Array.isArray(data.games) ? data.games : [];
+    if (isChattyOwner()) arcGames = await arcMigrateLegacyGames(arcGames);
+  } catch (e) {
+    arcGames = [];
+    grid.appendChild(arcEl('div', 'Could not load the shared Arcade: ' + e.message, 'note'));
   }
+  if (!arcGames.length && !grid.childElementCount) grid.appendChild(arcEl('div', 'No games have been uploaded yet.', 'note'));
+  if (isChattyOwner() && !arcGames.length) adm.appendChild(arcEl('div', 'No games uploaded yet.', 'note'));
   for (const g of arcGames) {
     const card = arcEl('div', null, 'arc-card');
     const ico = arcEl('div', (g.name[0] || '?').toUpperCase(), 'arc-ico'); ico.style.background = 'hsl(' + hue(g.id) + ',55%,45%)';
     const play = arcEl('button', 'Play', 'btn'); play.type = 'button'; play.onclick = () => arcPlay(g);
-    card.append(ico, arcEl('b', g.name), arcEl('small', arcSize(g.size)), play); grid.appendChild(card);
-    const row = arcEl('div', null, 'arc-row');
-    const p2 = arcEl('button', 'Play', 'btn ghost'); p2.type = 'button'; p2.onclick = () => { $('adminDlg').close(); arcPlay(g); };
-    const rm = arcEl('button', 'Remove', 'btn red'); rm.type = 'button'; rm.onclick = () => arcRemove(g);
-    row.append(arcEl('span', g.name + ' · ' + arcSize(g.size) + (g.trusted ? ' · trusted' : '')), p2, rm); adm.appendChild(row);
+    card.append(ico, arcEl('b', g.name), arcEl('small', arcSize(Number(g.size) || 0)), play); grid.appendChild(card);
+    if (isChattyOwner()) {
+      const row = arcEl('div', null, 'arc-row');
+      const p2 = arcEl('button', 'Play', 'btn ghost'); p2.type = 'button'; p2.onclick = () => { $('adminDlg').close(); arcPlay(g); };
+      const rm = arcEl('button', 'Remove for everyone', 'btn red'); rm.type = 'button'; rm.onclick = () => arcRemove(g);
+      row.append(arcEl('span', g.name + ' · ' + arcSize(Number(g.size) || 0)), p2, rm); adm.appendChild(row);
+    }
   }
+  if ($('arcadeStatus') && isChattyOwner() && !arcGames.length && !$('arcadeStatus').textContent) $('arcadeStatus').textContent = 'Upload a game to add it to everyone’s Arcade.';
 }
 $('arcadeBtn').addEventListener('click', async () => { await renderArcade(); $('arcadeDlg').showModal(); });
 $('arcadeClose').addEventListener('click', () => $('arcadeDlg').close());
@@ -2212,16 +2251,16 @@ $('arcadeAdd').addEventListener('click', async () => {
   if (!f) { st.textContent = 'Choose a game’s HTML file first.'; return; }
   if (!/\.html?$/i.test(f.name)) { st.textContent = 'That isn’t an .html file.'; return; }
   if (!f.size) { st.textContent = 'That file is empty.'; return; }
+  if (f.size > 1500000) { st.textContent = 'Game files must be 1.5 MB or smaller.'; return; }
   const name = ($('arcadeName').value.trim() || f.name.replace(/\.html?$/i, '')).slice(0, 40);
-  const g = { id: 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, trusted: $('arcadeTrusted').checked, size: f.size, added: Date.now() };
-  $('arcadeAdd').disabled = true; st.textContent = 'Saving ' + arcSize(f.size) + '…';
+  $('arcadeAdd').disabled = true; st.textContent = 'Uploading ' + arcSize(f.size) + ' to the shared Arcade…';
   try {
-    const blob = f.slice(0, f.size, 'text/html');
-    await arcTx('readwrite', (gs, fs) => { gs.put(g); return fs.put({ id: g.id, blob }); });
-    st.textContent = 'Added “' + name + '”.';
-    $('arcadeFile').value = ''; $('arcadeName').value = ''; $('arcadeTrusted').checked = false;
-    renderArcade();
-  } catch (e) { st.textContent = 'Could not save it: ' + e.message; }
+    const source = await f.text();
+    await api('/api/arcade/upload', { method: 'POST', body: JSON.stringify({ name, html: source }) });
+    st.textContent = 'Uploaded “' + name + '”. It is now available to all Chatty users.';
+    $('arcadeFile').value = ''; $('arcadeName').value = '';
+    await renderArcade();
+  } catch (e) { st.textContent = 'Upload failed: ' + e.message; }
   finally { $('arcadeAdd').disabled = false; }
 });
 
