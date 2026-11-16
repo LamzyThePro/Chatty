@@ -219,6 +219,9 @@ dialog::backdrop{backdrop-filter:blur(5px)}
 #arcadeDownloadSpinner{width:17px;height:17px;border:2px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:arcadeSpin .75s linear infinite;flex:none}
 #arcadeDownloadBar{height:7px;margin-top:11px;overflow:hidden;border-radius:99px;background:var(--line)}
 #arcadeDownloadFill{width:0;height:100%;border-radius:inherit;background:var(--brand);transition:width .16s ease}
+#arcadeDownloadFill.indeterminate{width:35%;animation:arcadeProgress 1.2s ease-in-out infinite}
+@keyframes arcadeProgress{0%{transform:translateX(-110%)}100%{transform:translateX(310%)}}
+@media(prefers-reduced-motion:reduce){#arcadeDownloadFill.indeterminate{animation:none;width:100%}}
 #arcadeDownloadDetail{display:block;margin-top:7px;color:var(--muted);font-size:12px}
 @keyframes arcadeSpin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#arcadeDownloadSpinner{animation:none}#arcadeDownloadFill{transition:none}}
@@ -2372,7 +2375,7 @@ async function renderArcade() {
   }
   if ($('arcadeStatus') && isChattyOwner() && !arcGames.length && !$('arcadeStatus').textContent) $('arcadeStatus').textContent = 'Upload a game to add it to everyone’s Arcade.';
 }
-$('arcadeBtn').addEventListener('click', async () => { await renderArcade(); $('arcadeDlg').showModal(); });
+$('arcadeBtn').addEventListener('click', async () => { arcDownloadUi(false); await renderArcade(); $('arcadeDlg').showModal(); });
 $('arcadeClose').addEventListener('click', () => $('arcadeDlg').close());
 $('arcadeBack').addEventListener('click', arcStop);
 $('arcadeFull').addEventListener('click', () => { const f = $('arcadeFrame'); if (f.requestFullscreen) f.requestFullscreen().catch(() => toast('Full screen was blocked by the browser.')); });
