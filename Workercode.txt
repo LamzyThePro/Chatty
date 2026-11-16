@@ -394,6 +394,12 @@ async function ensureGroupSchema(env) {
       FOREIGN KEY (message_id) REFERENCES messages(id),
       FOREIGN KEY (user_id) REFERENCES users(id)
     )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS hidden_conversations (
+      conversation_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      hidden_at INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, user_id)
+    )`),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_group_admins_user ON group_admins(user_id)"),
     env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_reactions_message ON message_reactions(message_id)")
   ]);
@@ -1058,9 +1064,30 @@ export default {
         await ensureGroupSchema(env);
         const conversationId = groupRoute[1], action = groupRoute[2] || "";
         const group = await getGroup(env, conversationId);
-        if (!group || !(await isConversationMember(env, conversationId, user.id))) {
-          return json({ error: "Group not found" }, 404);
+        if (!group) return json({ error: "Group not found" }, 404);
+        if (request.method === "DELETE" && !action) {
+          await ensureTypingSchema(env);
+          if (String(group.created_by) === String(user.id)) {
+            await env.DB.batch([
+              env.DB.prepare("DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = ?)").bind(conversationId),
+              env.DB.prepare("DELETE FROM messages WHERE conversation_id = ?").bind(conversationId),
+              env.DB.prepare("DELETE FROM typing_status WHERE conversation_id = ?").bind(conversationId),
+              env.DB.prepare("DELETE FROM group_admins WHERE conversation_id = ?").bind(conversationId),
+              env.DB.prepare("DELETE FROM conversation_members WHERE conversation_id = ?").bind(conversationId),
+              env.DB.prepare("DELETE FROM group_details WHERE conversation_id = ?").bind(conversationId),
+              env.DB.prepare("DELETE FROM conversations WHERE id = ? AND type = 'group'").bind(conversationId)
+            ]);
+            return json({ success: true, deleted: true });
+          }
+          if (!(await isConversationMember(env, conversationId, user.id))) return json({ error: "Group not found" }, 404);
+          await env.DB.batch([
+            env.DB.prepare("DELETE FROM group_admins WHERE conversation_id = ? AND user_id = ?").bind(conversationId, user.id),
+            env.DB.prepare("DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?").bind(conversationId, user.id),
+            env.DB.prepare("DELETE FROM typing_status WHERE conversation_id = ? AND user_id = ?").bind(conversationId, user.id)
+          ]);
+          return json({ success: true, left: true });
         }
+        if (!(await isConversationMember(env, conversationId, user.id))) return json({ error: "Group not found" }, 404);
         if (request.method === "GET" && action === "membership") {
           return json({ member: true });
         }
@@ -1199,7 +1226,8 @@ export default {
           env.DB.prepare(`
             INSERT OR IGNORE INTO conversation_members
               (conversation_id, user_id, joined_at) VALUES (?, ?, ?)
-          `).bind(conversation.id, target.id, now)
+          `).bind(conversation.id, target.id, now),
+          env.DB.prepare("DELETE FROM hidden_conversations WHERE conversation_id = ? AND user_id = ?").bind(conversation.id, user.id)
         ]);
 
         return json({
@@ -1237,11 +1265,30 @@ export default {
           LEFT JOIN users other ON other.id = theirs.user_id
           LEFT JOIN group_details gd ON gd.conversation_id = c.id
           WHERE mine.user_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM hidden_conversations hidden
+              WHERE hidden.conversation_id = c.id AND hidden.user_id = mine.user_id
+            )
           ORDER BY COALESCE(last_message_at, c.created_at) DESC
           LIMIT 100
         `).bind(user.id, user.id).all();
 
         return json({ conversations: result.results });
+      }
+
+      if (path === "/api/conversations/hide" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureGroupSchema(env);
+        const body = await readBody(request);
+        const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+        if (!conversationId || conversationId.length > 100) return json({ error: "Conversation ID required" }, 400);
+        const conversation = await env.DB.prepare("SELECT type FROM conversations WHERE id = ?").bind(conversationId).first();
+        if (!conversation || conversation.type !== "direct" || !(await isConversationMember(env, conversationId, user.id))) {
+          return json({ error: "Direct conversation not found" }, 404);
+        }
+        await env.DB.prepare("INSERT OR IGNORE INTO hidden_conversations (conversation_id, user_id, hidden_at) VALUES (?, ?, ?)").bind(conversationId, user.id, Date.now()).run();
+        return json({ success: true, hidden: true });
       }
 
       if (path === "/api/messages" && request.method === "GET") {
