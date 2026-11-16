@@ -508,7 +508,8 @@ const PEER_OPTS = Object.assign({ debug: 0, config: { iceServers: [
 const LS = 'chatty1:';
 const APP_VERSION = '1.0.23';
 const APP_RELEASE_DATE = '2026-11-15';
-$('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');\nif ($('railVersion')) $('railVersion').textContent = 'v' + APP_VERSION;
+$('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');
+if ($('railVersion')) $('railVersion').textContent = 'v' + APP_VERSION;
 const API_BASE = 'https://chatty.yeshas-sujith.workers.dev';
 const store = {
   get(k, d) { try { const v = localStorage.getItem(LS + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
