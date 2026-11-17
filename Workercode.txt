@@ -1494,13 +1494,27 @@ export default {
         if (!conversationId || conversationId.length > 100 || !mediaType) return json({ error: "Invalid call" }, 400);
         if (!(await isConversationMember(env, conversationId, user.id))) return json({ error: "Conversation not found" }, 404);
         const now = Date.now();
-        const existing = await env.DB.prepare("SELECT id, media_type FROM call_sessions WHERE conversation_id = ? AND ended_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1").bind(conversationId, now).first();
-        if (existing) return json({ error: "A call is already active", callId: existing.id, mediaType: existing.media_type }, 409);
         const callId = randomId(18);
-        await env.DB.batch([
-          env.DB.prepare("INSERT INTO call_sessions (id, conversation_id, created_by, media_type, created_at, expires_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL)").bind(callId, conversationId, user.id, mediaType, now, now + 4 * 60 * 60 * 1000),
-          env.DB.prepare("INSERT INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)").bind(callId, user.id, now)
-        ]);
+        // Keep the "one active call per conversation" rule inside the INSERT
+        // itself so two callers cannot both pass a separate preflight SELECT.
+        const created = await env.DB.prepare(`
+          INSERT INTO call_sessions
+            (id, conversation_id, created_by, media_type, created_at, expires_at, ended_at)
+          SELECT ?, ?, ?, ?, ?, ?, NULL
+          WHERE NOT EXISTS (
+            SELECT 1 FROM call_sessions
+            WHERE conversation_id = ? AND ended_at IS NULL AND expires_at > ?
+          )
+        `).bind(callId, conversationId, user.id, mediaType, now, now + 4 * 60 * 60 * 1000, conversationId, now).run();
+        if (!Number(created.meta?.changes || 0)) {
+          const existing = await env.DB.prepare(
+            "SELECT id, media_type FROM call_sessions WHERE conversation_id = ? AND ended_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1"
+          ).bind(conversationId, now).first();
+          return json({ error: "A call is already active", callId: existing?.id || null, mediaType: existing?.media_type || null }, 409);
+        }
+        await env.DB.prepare(
+          "INSERT INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)"
+        ).bind(callId, user.id, now).run();
         return json({ success: true, callId, mediaType }, 201);
       }
 
@@ -1530,9 +1544,19 @@ export default {
         if (!callId || callId.length > 100) return json({ error: "Invalid call" }, 400);
         const call = await env.DB.prepare("SELECT id, conversation_id, media_type, expires_at, ended_at FROM call_sessions WHERE id = ?").bind(callId).first();
         if (!call || call.ended_at || call.expires_at <= Date.now() || !(await isConversationMember(env, call.conversation_id, user.id))) return json({ error: "Call is no longer available" }, 404);
-        const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM call_participants WHERE call_id = ?").bind(callId).first();
-        if (Number(count?.n || 0) >= 8 && !(await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first())) return json({ error: "This group call has reached its 8-person limit" }, 409);
-        await env.DB.prepare("INSERT OR IGNORE INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)").bind(callId, user.id, Date.now()).run();
+        const joinedAt = Date.now();
+        // Enforce the participant cap in the INSERT to avoid simultaneous joins
+        // both observing a free slot and pushing the call over its limit.
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO call_participants (call_id, user_id, joined_at)
+          SELECT ?, ?, ?
+          WHERE (SELECT COUNT(*) FROM call_participants WHERE call_id = ?) < 8
+             OR EXISTS (SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?)
+        `).bind(callId, user.id, joinedAt, callId, callId, user.id).run();
+        const joined = await env.DB.prepare(
+          "SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?"
+        ).bind(callId, user.id).first();
+        if (!joined) return json({ error: "This group call has reached its 8-person limit" }, 409);
         const people = await env.DB.prepare("SELECT u.id, u.username FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = ? AND cp.user_id != ? ORDER BY cp.joined_at").bind(callId, user.id).all();
         return json({ success: true, callId, conversationId: call.conversation_id, mediaType: call.media_type, participants: people.results });
       }
@@ -1553,7 +1577,8 @@ export default {
         if (!user) return json({ error: "Unauthorized" }, 401);
         await ensureCallSchema(env);
         const callId = url.searchParams.get("callId") || "";
-        const after = Math.max(0, Number(url.searchParams.get("after") || 0));
+        const afterValue = Number(url.searchParams.get("after") || 0);
+        const after = Number.isSafeInteger(afterValue) && afterValue >= 0 ? afterValue : 0;
         const participant = await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first();
         if (!participant) return json({ error: "Call not found" }, 404);
         const result = await env.DB.prepare("SELECT id, from_user_id, payload FROM call_signals WHERE call_id = ? AND to_user_id = ? AND id > ? ORDER BY id LIMIT 100").bind(callId, user.id, after).all();
@@ -1588,6 +1613,8 @@ export default {
         const call = await env.DB.prepare("SELECT conversation_id FROM call_sessions WHERE id = ? AND ended_at IS NULL").bind(callId).first();
         if (!call || !(await isConversationMember(env, call.conversation_id, user.id))) return json({ success: true });
         await env.DB.prepare("DELETE FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).run();
+        // Remove this member's queued signaling data; it is no longer deliverable.
+        await env.DB.prepare("DELETE FROM call_signals WHERE call_id = ? AND (from_user_id = ? OR to_user_id = ?)").bind(callId, user.id, user.id).run();
         const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM call_participants WHERE call_id = ?").bind(callId).first();
         if (!Number(left?.n || 0)) {
           await env.DB.prepare("UPDATE call_sessions SET ended_at = ? WHERE id = ?").bind(Date.now(), callId).run();
