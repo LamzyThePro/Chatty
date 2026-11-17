@@ -1511,12 +1511,13 @@ export default {
         const now = Date.now();
         const result = await env.DB.prepare(`
           SELECT cs.id AS call_id, cs.conversation_id, cs.media_type, cs.created_by, cs.created_at,
+            EXISTS(SELECT 1 FROM call_participants mine WHERE mine.call_id = cs.id AND mine.user_id = ?) AS is_participant,
             (SELECT COUNT(*) FROM call_participants cp WHERE cp.call_id = cs.id) AS participant_count,
             (SELECT GROUP_CONCAT(u.username, ', ') FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = cs.id) AS participant_names
           FROM call_sessions cs JOIN conversation_members cm ON cm.conversation_id = cs.conversation_id AND cm.user_id = ?
           WHERE cs.ended_at IS NULL AND cs.expires_at > ?
           ORDER BY cs.created_at DESC LIMIT 20
-        `).bind(user.id, now).all();
+        `).bind(user.id, user.id, now).all();
         return json({ calls: result.results });
       }
 
