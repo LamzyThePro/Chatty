@@ -2843,9 +2843,8 @@ async function pollIncomingCalls(){
   if(!authToken || liveCall || incomingCall || !Object.keys(contacts).length)return;
   try{
     const data=await api("/api/calls/active");
-    const mine=new Set((data.calls||[]).map(c=>c.call_id));
-    const candidate=(data.calls||[]).find(c=>!callPeers.has(c.call_id) && !Object.values(contacts).some(ct=>ct && ct.backend && String(ct.conversationId)===String(c.conversation_id) && ct._dismissedCall===c.call_id));
-    if(candidate && candidate.created_by!==authUser.id){
+    const candidate=(data.calls||[]).find(c=>!c.is_participant && !Object.values(contacts).some(ct=>ct && ct.backend && String(ct.conversationId)===String(c.conversation_id) && ct._dismissedCall===c.call_id));
+    if(candidate && String(candidate.created_by)!==String(authUser.id)){
       incomingCall=candidate;
       ringForCall();
       $("callOverlay").hidden=false;$("callIncoming").hidden=false;$("callActiveControls").hidden=true;
