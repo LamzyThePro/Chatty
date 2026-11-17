@@ -913,6 +913,46 @@ export default {
         return json({ success: true, user: publicUser(user), token });
       }
 
+      // Shared Arcade storage check. This route is read-only: it never creates a release.
+      if (path === "/api/arcade/status" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        if (!env.GITHUB_TOKEN) {
+          return json({
+            ok: false,
+            problem: "GitHub storage is not configured. Add the GITHUB_TOKEN Worker secret.",
+            tokenConfigured: false,
+            repository: ARCADE_GITHUB_OWNER + "/" + ARCADE_GITHUB_REPO,
+            releaseTag: ARCADE_GITHUB_TAG,
+            maxMegabytes: 95
+          });
+        }
+        try {
+          const releaseResponse = await arcadeGitHubRequest(
+            env,
+            "/repos/" + ARCADE_GITHUB_OWNER + "/" + ARCADE_GITHUB_REPO + "/releases/tags/" + ARCADE_GITHUB_TAG
+          );
+          const release = await releaseResponse.json();
+          return json({
+            ok: true,
+            tokenConfigured: true,
+            repository: ARCADE_GITHUB_OWNER + "/" + ARCADE_GITHUB_REPO,
+            releaseTag: release.tag_name || ARCADE_GITHUB_TAG,
+            assets: Array.isArray(release.assets) ? release.assets.length : 0,
+            maxMegabytes: 95
+          });
+        } catch (error) {
+          return json({
+            ok: false,
+            tokenConfigured: true,
+            repository: ARCADE_GITHUB_OWNER + "/" + ARCADE_GITHUB_REPO,
+            releaseTag: ARCADE_GITHUB_TAG,
+            maxMegabytes: 95,
+            problem: String(error && error.message || error).slice(0, 400)
+          });
+        }
+      }
+
       // Shared Arcade: signed-in users browse/play; only the Owner uploads/removes.
       if (path === "/api/arcade" && request.method === "GET") {
         const user = await getUser(request, env);
