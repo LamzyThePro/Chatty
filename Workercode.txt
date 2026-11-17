@@ -662,6 +662,31 @@ function escapeLike(value) {
   return value.replace(/[\\%_]/g, ch => "\\" + ch);
 }
 
+
+let callSchemaReady = false;
+async function ensureCallSchema(env) {
+  if (callSchemaReady) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS call_sessions (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, created_by TEXT NOT NULL,
+      media_type TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      ended_at INTEGER
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS call_participants (
+      call_id TEXT NOT NULL, user_id TEXT NOT NULL, joined_at INTEGER NOT NULL,
+      PRIMARY KEY (call_id, user_id)
+    )`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS call_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT NOT NULL,
+      from_user_id TEXT NOT NULL, to_user_id TEXT NOT NULL,
+      payload TEXT NOT NULL, created_at INTEGER NOT NULL
+    )`),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_call_signals_target ON call_signals(call_id, to_user_id, id)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_call_sessions_active ON call_sessions(conversation_id, ended_at, expires_at)")
+  ]);
+  callSchemaReady = true;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1455,6 +1480,118 @@ export default {
           WHERE conversation_id = ? AND user_id = ?
         `).bind(Date.now(), conversationId, user.id).run();
 
+        return json({ success: true });
+      }
+
+
+      if (path === "/api/calls/start" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const body = await readBody(request);
+        const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+        const mediaType = body.mediaType === "video" ? "video" : body.mediaType === "audio" ? "audio" : "";
+        if (!conversationId || conversationId.length > 100 || !mediaType) return json({ error: "Invalid call" }, 400);
+        if (!(await isConversationMember(env, conversationId, user.id))) return json({ error: "Conversation not found" }, 404);
+        const now = Date.now();
+        const existing = await env.DB.prepare("SELECT id, media_type FROM call_sessions WHERE conversation_id = ? AND ended_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1").bind(conversationId, now).first();
+        if (existing) return json({ error: "A call is already active", callId: existing.id, mediaType: existing.media_type }, 409);
+        const callId = randomId(18);
+        await env.DB.batch([
+          env.DB.prepare("INSERT INTO call_sessions (id, conversation_id, created_by, media_type, created_at, expires_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL)").bind(callId, conversationId, user.id, mediaType, now, now + 4 * 60 * 60 * 1000),
+          env.DB.prepare("INSERT INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)").bind(callId, user.id, now)
+        ]);
+        return json({ success: true, callId, mediaType }, 201);
+      }
+
+      if (path === "/api/calls/active" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const now = Date.now();
+        const result = await env.DB.prepare(`
+          SELECT cs.id AS call_id, cs.conversation_id, cs.media_type, cs.created_by, cs.created_at,
+            (SELECT COUNT(*) FROM call_participants cp WHERE cp.call_id = cs.id) AS participant_count,
+            (SELECT GROUP_CONCAT(u.username, ', ') FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = cs.id) AS participant_names
+          FROM call_sessions cs JOIN conversation_members cm ON cm.conversation_id = cs.conversation_id AND cm.user_id = ?
+          WHERE cs.ended_at IS NULL AND cs.expires_at > ?
+          ORDER BY cs.created_at DESC LIMIT 20
+        `).bind(user.id, now).all();
+        return json({ calls: result.results });
+      }
+
+      if (path === "/api/calls/join" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const body = await readBody(request);
+        const callId = typeof body.callId === "string" ? body.callId : "";
+        if (!callId || callId.length > 100) return json({ error: "Invalid call" }, 400);
+        const call = await env.DB.prepare("SELECT id, conversation_id, media_type, expires_at, ended_at FROM call_sessions WHERE id = ?").bind(callId).first();
+        if (!call || call.ended_at || call.expires_at <= Date.now() || !(await isConversationMember(env, call.conversation_id, user.id))) return json({ error: "Call is no longer available" }, 404);
+        const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM call_participants WHERE call_id = ?").bind(callId).first();
+        if (Number(count?.n || 0) >= 8 && !(await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first())) return json({ error: "This group call has reached its 8-person limit" }, 409);
+        await env.DB.prepare("INSERT OR IGNORE INTO call_participants (call_id, user_id, joined_at) VALUES (?, ?, ?)").bind(callId, user.id, Date.now()).run();
+        const people = await env.DB.prepare("SELECT u.id, u.username FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = ? AND cp.user_id != ? ORDER BY cp.joined_at").bind(callId, user.id).all();
+        return json({ success: true, callId, conversationId: call.conversation_id, mediaType: call.media_type, participants: people.results });
+      }
+
+      if (path === "/api/calls/participants" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const callId = url.searchParams.get("callId") || "";
+        const call = await env.DB.prepare("SELECT conversation_id FROM call_sessions WHERE id = ? AND ended_at IS NULL AND expires_at > ?").bind(callId, Date.now()).first();
+        if (!call || !(await isConversationMember(env, call.conversation_id, user.id)) || !(await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first())) return json({ error: "Call not found" }, 404);
+        const people = await env.DB.prepare("SELECT u.id, u.username FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = ? AND cp.user_id != ?").bind(callId, user.id).all();
+        return json({ participants: people.results });
+      }
+
+      if (path === "/api/calls/signals" && request.method === "GET") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const callId = url.searchParams.get("callId") || "";
+        const after = Math.max(0, Number(url.searchParams.get("after") || 0));
+        const participant = await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first();
+        if (!participant) return json({ error: "Call not found" }, 404);
+        const result = await env.DB.prepare("SELECT id, from_user_id, payload FROM call_signals WHERE call_id = ? AND to_user_id = ? AND id > ? ORDER BY id LIMIT 100").bind(callId, user.id, after).all();
+        return json({ signals: result.results });
+      }
+
+      if (path === "/api/calls/signal" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const body = await readBody(request, 30000);
+        const callId = typeof body.callId === "string" ? body.callId : "";
+        const toUserId = typeof body.toUserId === "string" ? body.toUserId : "";
+        const payload = body.payload;
+        const serialized = JSON.stringify(payload);
+        if (!callId || !toUserId || toUserId.length > 100 || !payload || serialized.length > 20000 || !["offer","answer","ice","leave"].includes(payload.type)) return json({ error: "Invalid call signal" }, 400);
+        const call = await env.DB.prepare("SELECT conversation_id FROM call_sessions WHERE id = ? AND ended_at IS NULL AND expires_at > ?").bind(callId, Date.now()).first();
+        if (!call || !(await isConversationMember(env, call.conversation_id, user.id))) return json({ error: "Call not found" }, 404);
+        const sender = await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first();
+        const target = await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, toUserId).first();
+        if (!sender || !target || user.id === toUserId) return json({ error: "Invalid call participant" }, 403);
+        await env.DB.prepare("INSERT INTO call_signals (call_id, from_user_id, to_user_id, payload, created_at) VALUES (?, ?, ?, ?, ?)").bind(callId, user.id, toUserId, serialized, Date.now()).run();
+        return json({ success: true });
+      }
+
+      if (path === "/api/calls/leave" && request.method === "POST") {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: "Unauthorized" }, 401);
+        await ensureCallSchema(env);
+        const body = await readBody(request);
+        const callId = typeof body.callId === "string" ? body.callId : "";
+        const call = await env.DB.prepare("SELECT conversation_id FROM call_sessions WHERE id = ? AND ended_at IS NULL").bind(callId).first();
+        if (!call || !(await isConversationMember(env, call.conversation_id, user.id))) return json({ success: true });
+        await env.DB.prepare("DELETE FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).run();
+        const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM call_participants WHERE call_id = ?").bind(callId).first();
+        if (!Number(left?.n || 0)) {
+          await env.DB.prepare("UPDATE call_sessions SET ended_at = ? WHERE id = ?").bind(Date.now(), callId).run();
+          await env.DB.prepare("DELETE FROM call_signals WHERE call_id = ?").bind(callId).run();
+        }
         return json({ success: true });
       }
 
