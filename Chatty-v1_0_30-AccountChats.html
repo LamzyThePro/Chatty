@@ -283,6 +283,21 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
 }
 @media(prefers-reduced-motion:reduce){.rail-link{transition:none!important}}
 
+
+#chat .call-action{background:rgba(18,140,126,.10);color:var(--brand);font-size:18px}
+#callOverlay{position:fixed;inset:0;z-index:10000;background:rgba(7,18,24,.88);display:grid;place-items:center;padding:18px;color:#fff}
+#callOverlay[hidden]{display:none!important}
+.call-panel{width:min(920px,100%);max-height:95vh;overflow:auto;background:#14252d;border:1px solid #31515b;border-radius:22px;padding:20px;box-shadow:0 24px 80px #0008}
+.call-top{display:flex;justify-content:space-between;gap:12px;font-weight:700;margin-bottom:16px}
+.call-videos{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.call-videos video{width:100%;aspect-ratio:16/10;object-fit:cover;background:#071116;border-radius:14px}
+.call-videos .call-tile{position:relative;min-height:120px;background:#203943;border-radius:14px;display:grid;place-items:center;overflow:hidden}
+.call-videos .call-tile small{position:absolute;bottom:9px;left:12px;background:#0009;padding:4px 8px;border-radius:8px}
+.call-controls{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;margin-top:18px}
+.call-control{padding:12px 16px;border-radius:999px;background:#29434c;color:white;font-weight:650}
+.call-control.danger,.btn.red{background:#c83c45;color:white}
+#callIncoming{text-align:center;padding:30px 8px}
+@media(max-width:600px){.call-panel{padding:14px;border-radius:16px}.call-videos{grid-template-columns:1fr}.call-controls button{flex:1}}
 </style>
 </head>
 <body>
@@ -338,6 +353,8 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
         <button class="ic" id="back" aria-label="Back">←</button>
         <div class="avatar" id="pAvatar"></div>
         <div class="who"><b id="pName"></b><small id="pStatus"></small></div>
+        <button class="ic call-action" id="voiceCall" title="Voice call" aria-label="Voice call">☎</button>
+        <button class="ic call-action" id="videoCall" title="Video call" aria-label="Video call">▣</button>
         <button class="ic" id="renameBtn" title="Rename" aria-label="Rename">✎</button>
         <button class="ic" id="delBtn" title="Delete chat" aria-label="Delete chat">🗑</button>
         <button class="ic" id="blockBtn" title="Block" aria-label="Block">🚫</button>
@@ -352,6 +369,18 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
   </main>
 </div>
 
+<section id="callOverlay" hidden aria-live="polite">
+  <div class="call-panel">
+    <div class="call-top"><span id="callKind">Voice call</span><span id="callState">Connecting…</span></div>
+    <div id="callVideos" class="call-videos"></div>
+    <div id="callIncoming" hidden><h2 id="incomingTitle">Incoming call</h2><p id="incomingInfo"></p><div class="call-controls"><button id="acceptCall" class="btn">Accept</button><button id="declineCall" class="btn red">Decline</button></div></div>
+    <div id="callActiveControls" class="call-controls">
+      <button id="muteCall" class="call-control">Mute mic</button>
+      <button id="cameraCall" class="call-control">Camera off</button>
+      <button id="hangupCall" class="call-control danger">End call</button>
+    </div>
+  </div>
+</section>
 <dialog id="welcome">
   <h3>Chatty account</h3>
   <p id="authIntro">Sign in to continue. Your chats remain stored on this device.</p>
@@ -2691,6 +2720,146 @@ $('settingsBtn').addEventListener('click', () => {
   document.querySelectorAll('.rail-link').forEach(button => button.classList.remove('active'));
   $('railSettings').classList.add('active');
 });
+
+
+/* ---------- WebRTC calls for account conversations ---------- */
+let liveCall = null;
+let callPollTimer = null;
+let incomingCall = null;
+let callSignalCursor = 0;
+const callPeers = new Map();
+const callRemoteStreams = new Map();
+let localCallStream = null;
+let callMuted = false, callCameraOff = false;
+function callToast(text){ if (typeof toast === "function") toast(text); else console.log(text); }
+function callTile(id,name,stream,local=false){
+  const wrap=document.createElement("div"); wrap.className="call-tile"; wrap.dataset.peer=id;
+  const video=document.createElement("video"); video.autoplay=true; video.playsInline=true; video.muted=local; video.srcObject=stream;
+  const label=document.createElement("small"); label.textContent=local ? "You" : (name || "Participant");
+  wrap.append(video,label); $("callVideos").append(wrap);
+}
+function clearCallTiles(){ $("callVideos").replaceChildren(); }
+async function sendCallSignal(toUserId,payload){
+  if(!liveCall) return;
+  await api("/api/calls/signal",{method:"POST",body:JSON.stringify({callId:liveCall.callId,toUserId,payload})});
+}
+function newCallPeer(person){
+  if(callPeers.has(person.id)) return callPeers.get(person.id);
+  const pc=new RTCPeerConnection({iceServers:[
+    {urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}
+  ]});
+  callPeers.set(person.id,pc);
+  if(localCallStream) localCallStream.getTracks().forEach(track=>pc.addTrack(track,localCallStream));
+  pc.onicecandidate=e=>{if(e.candidate) sendCallSignal(person.id,{type:"ice",candidate:e.candidate.toJSON()}).catch(()=>{});};
+  pc.ontrack=e=>{
+    let stream=callRemoteStreams.get(person.id);
+    if(!stream){stream=e.streams[0]||new MediaStream();callRemoteStreams.set(person.id,stream);callTile(person.id,person.username,stream,false);}
+    if(!e.streams[0] && !stream.getTracks().some(t=>t.id===e.track.id)) stream.addTrack(e.track);
+  };
+  pc.onconnectionstatechange=()=>{if(["failed","closed"].includes(pc.connectionState)){const el=$("callVideos").querySelector('[data-peer="'+CSS.escape(person.id)+'"]');if(el)el.remove();}};
+  return pc;
+}
+async function negotiateCallPeer(person){
+  if(!liveCall || callPeers.has(person.id) || String(authUser.id).localeCompare(String(person.id))>0) return;
+  const pc=newCallPeer(person);
+  const offer=await pc.createOffer(); await pc.setLocalDescription(offer);
+  await sendCallSignal(person.id,{type:"offer",description:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
+}
+async function handleCallSignal(signal){
+  const person={id:signal.from_user_id,username:"Participant"};
+  const payload=JSON.parse(signal.payload);
+  if(payload.type==="leave"){const pc=callPeers.get(person.id);if(pc)pc.close();callPeers.delete(person.id);return;}
+  let pc=callPeers.get(person.id);
+  if(payload.type==="offer"){
+    if(!pc) pc=newCallPeer(person);
+    await pc.setRemoteDescription(payload.description);
+    const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
+    await sendCallSignal(person.id,{type:"answer",description:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
+  }else if(payload.type==="answer"){
+    if(pc && !pc.currentRemoteDescription) await pc.setRemoteDescription(payload.description);
+  }else if(payload.type==="ice"){
+    if(pc && payload.candidate) try{await pc.addIceCandidate(payload.candidate);}catch(e){}
+  }
+}
+async function refreshCallPeers(){
+  if(!liveCall) return;
+  const data=await api("/api/calls/participants?callId="+encodeURIComponent(liveCall.callId));
+  const people=data.participants||[];
+  for(const person of people) await negotiateCallPeer(person);
+  const signals=await api("/api/calls/signals?callId="+encodeURIComponent(liveCall.callId)+"&after="+callSignalCursor);
+  for(const signal of (signals.signals||[])){callSignalCursor=Math.max(callSignalCursor,Number(signal.id)||0);await handleCallSignal(signal);}
+  $("callState").textContent=people.length+1+" in call";
+}
+async function enterCall(callId,mediaType,conversationId){
+  if(liveCall) return;
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("Calls need a secure browser connection (HTTPS) and camera/microphone permission.");
+  localCallStream=await navigator.mediaDevices.getUserMedia({audio:true,video:mediaType==="video"});
+  const ct=Object.values(contacts).find(c=>c && c.backend && String(c.conversationId)===String(conversationId));
+  liveCall={callId,mediaType,conversationId};
+  callSignalCursor=0;callMuted=false;callCameraOff=false;callPeers.clear();callRemoteStreams.clear();
+  $("callOverlay").hidden=false;$("callIncoming").hidden=true;$("callActiveControls").hidden=false;
+  $("callKind").textContent=mediaType==="video"?"Video call":"Voice call";
+  $("callState").textContent="Connecting…";clearCallTiles();
+  if(mediaType==="video") callTile("local","You",localCallStream,true);
+  else {const tile=document.createElement("div");tile.className="call-tile";tile.textContent="Voice call";$("callVideos").append(tile);}
+  if(ct && active!==ct.code) openChat(ct.code);
+  if(callPollTimer) clearInterval(callPollTimer);
+  callPollTimer=setInterval(()=>refreshCallPeers().catch(e=>console.warn("Call sync:",e)),1100);
+  await refreshCallPeers();
+}
+async function startAccountCall(mediaType){
+  const ct=active && contacts[active];
+  if(!ct || !ct.backend || !ct.conversationId){callToast("Calls are available in signed-in account chats.");return;}
+  if(liveCall) return;
+  try{
+    const data=await api("/api/calls/start",{method:"POST",body:JSON.stringify({conversationId:ct.conversationId,mediaType})});
+    await enterCall(data.callId,mediaType,ct.conversationId);
+  }catch(e){
+    if(e.message==="A call is already active" && e.callId){callToast("A call is already active. Refresh the chat and join it from the incoming call prompt.");}
+    else callToast("Could not start call: "+e.message);
+  }
+}
+async function joinIncomingCall(){
+  if(!incomingCall) return;
+  const call=incomingCall;incomingCall=null;
+  try{const joined=await api("/api/calls/join",{method:"POST",body:JSON.stringify({callId:call.call_id})});await enterCall(joined.callId,joined.mediaType,joined.conversationId);}
+  catch(e){$("callOverlay").hidden=true;callToast("Could not join call: "+e.message);}
+}
+async function leaveAccountCall(){
+  if(!liveCall)return;
+  const call=liveCall;liveCall=null;
+  if(callPollTimer)clearInterval(callPollTimer);callPollTimer=null;
+  for(const [id,pc] of callPeers){try{await api("/api/calls/signal",{method:"POST",body:JSON.stringify({callId:call.callId,toUserId:id,payload:{type:"leave"}})});}catch(e){}pc.close();}
+  callPeers.clear();
+  if(localCallStream)localCallStream.getTracks().forEach(t=>t.stop());localCallStream=null;
+  $("callOverlay").hidden=true;clearCallTiles();
+  try{await api("/api/calls/leave",{method:"POST",body:JSON.stringify({callId:call.callId})});}catch(e){}
+}
+async function pollIncomingCalls(){
+  if(!authToken || liveCall || incomingCall || !Object.keys(contacts).length)return;
+  try{
+    const data=await api("/api/calls/active");
+    const mine=new Set((data.calls||[]).map(c=>c.call_id));
+    const candidate=(data.calls||[]).find(c=>!callPeers.has(c.call_id) && !Object.values(contacts).some(ct=>ct && ct.backend && String(ct.conversationId)===String(c.conversation_id) && ct._dismissedCall===c.call_id));
+    if(candidate && candidate.created_by!==authUser.id){
+      incomingCall=candidate;
+      $("callOverlay").hidden=false;$("callIncoming").hidden=false;$("callActiveControls").hidden=true;
+      $("callKind").textContent=candidate.media_type==="video"?"Incoming video call":"Incoming voice call";
+      $("callState").textContent="Incoming";
+      $("incomingTitle").textContent=(candidate.media_type==="video"?"Video":"Voice")+" call";
+      $("incomingInfo").textContent=(candidate.participant_names||"Someone")+" · "+candidate.participant_count+" participant(s)";
+      clearCallTiles();
+    }
+  }catch(e){}
+}
+$("voiceCall").addEventListener("click",()=>startAccountCall("audio"));
+$("videoCall").addEventListener("click",()=>startAccountCall("video"));
+$("acceptCall").addEventListener("click",joinIncomingCall);
+$("declineCall").addEventListener("click",()=>{if(incomingCall){const c=Object.values(contacts).find(x=>x && x.backend && String(x.conversationId)===String(incomingCall.conversation_id));if(c)c._dismissedCall=incomingCall.call_id;}incomingCall=null;$("callOverlay").hidden=true;});
+$("hangupCall").addEventListener("click",leaveAccountCall);
+$("muteCall").addEventListener("click",()=>{callMuted=!callMuted;if(localCallStream)localCallStream.getAudioTracks().forEach(t=>t.enabled=!callMuted);$("muteCall").textContent=callMuted?"Unmute mic":"Mute mic";});
+$("cameraCall").addEventListener("click",()=>{callCameraOff=!callCameraOff;if(localCallStream)localCallStream.getVideoTracks().forEach(t=>t.enabled=!callCameraOff);$("cameraCall").textContent=callCameraOff?"Camera on":"Camera off";});
+setInterval(pollIncomingCalls,3000);
 
 /* ---------- start ---------- ---------- */
 const splash = document.getElementById('chattySplash');
