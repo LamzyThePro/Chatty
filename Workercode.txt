@@ -476,9 +476,23 @@ async function arcadeGitHubRequest(env, path, options = {}) {
     }
   });
   if (!response.ok) {
-    let message = "";
-    try { message = (await response.json()).message || ""; } catch (_) {}
-    throw new Error("GitHub API error (" + response.status + ")" + (message ? ": " + message : ""));
+    let detail = "";
+    try {
+      const raw = await response.text();
+      try {
+        const parsed = JSON.parse(raw);
+        detail = parsed.message || raw;
+      } catch (_) {
+        detail = raw;
+      }
+    } catch (_) {}
+    detail = String(detail).replace(/gh[pousr]_[A-Za-z0-9_]+/g, "[redacted]").replace(/\s+/g, " ").slice(0, 300);
+    const requestId = response.headers.get("x-github-request-id") || "";
+    const contentType = response.headers.get("content-type") || "";
+    throw new Error("GitHub API error (" + response.status + ")" +
+      (detail ? ": " + detail : "") +
+      (contentType ? " [content-type: " + contentType + "]" : "") +
+      (requestId ? " [request-id: " + requestId + "]" : ""));
   }
   return response;
 }
