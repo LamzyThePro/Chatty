@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="application-name" content="Chatty">
-<title>Chatty v1.0.32 · 2026-11-17</title>
+<title>Chatty v1.0.34 · 2026-11-17</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23128c7e'/%3E%3Cpath d='M32 13c-11 0-20 7.700-20 17.500 0 5 2.300 9.500 6 12.600L16.500 51l8-3.800c2.300.7 4.700 1.100 7.500 1.100 11 0 20-7.800 20-17.500S43 13 32 13z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -298,6 +298,25 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
 .call-control.danger,.btn.red{background:#c83c45;color:white}
 #callIncoming{text-align:center;padding:30px 8px}
 @media(max-width:600px){.call-panel{padding:14px;border-radius:16px}.call-videos{grid-template-columns:1fr}.call-controls button{flex:1}}
+
+/* Chatty 1.0.34 — calm, clean workspace */
+:root{color-scheme:light dark;--brand:#5b63d8;--brand-d:#444bb5;--accent:#777df0;--bg:#f5f6fa;--panel:#fff;--text:#202334;--muted:#72788b;--line:#e8eaf1;--chat-bg:#f7f8fc;--me:#e8eaff;--them:#fff;--hover:#f0f1f8;--danger:#d84f63;--shadow:0 3px 14px rgba(35,39,70,.06)}
+@media(prefers-color-scheme:dark){:root{--brand:#a5aaff;--brand-d:#8c93ff;--accent:#b5b9ff;--bg:#11131b;--panel:#191c27;--text:#f1f2fa;--muted:#a0a5b6;--line:#2a2e3b;--chat-bg:#141722;--me:#333752;--them:#202431;--hover:#272c3b;--danger:#ff8494;--shadow:0 5px 18px rgba(0,0,0,.14)}}
+body{background:var(--bg);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:0}
+#app{max-width:1600px;grid-template-columns:68px minmax(280px,340px) minmax(0,1fr);margin:10px auto;height:calc(100% - 20px);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 55px rgba(20,25,55,.10)}
+#workspaceRail{gap:18px;padding:15px 8px;background:var(--panel);border-right:1px solid var(--line)}.rail-brand{border-radius:14px;background:var(--brand);color:#fff}.rail-link{border-radius:12px}.rail-link.active{background:color-mix(in srgb,var(--brand) 12%,var(--panel));color:var(--brand)}
+#side{background:var(--panel)}.bar{background:var(--panel);min-height:62px;padding:11px 14px}.tabs{background:var(--panel)}
+.row{margin:2px 7px;padding:11px 10px;border-radius:12px}.row:hover{transform:none;background:var(--hover)}.row.on{background:color-mix(in srgb,var(--brand) 9%,var(--panel));box-shadow:inset 3px 0 var(--brand)}
+.btn{border-radius:11px;background:var(--brand);box-shadow:none}.btn:hover{background:var(--brand-d);box-shadow:none}.btn.ghost{background:transparent;color:var(--brand);border:1px solid var(--line);box-shadow:none}
+#main{background:var(--chat-bg)}#msgs{padding:22px clamp(14px,5vw,72px)}.m{border:1px solid var(--line);border-radius:14px;box-shadow:none;padding:9px 12px;max-width:min(78%,680px)}.m.me{border-bottom-right-radius:5px}.m.them{border-bottom-left-radius:5px}
+#composer{background:var(--panel);border-top:1px solid var(--line);padding:12px 16px}#input{border:1px solid var(--line);background:var(--bg);border-radius:13px;box-shadow:none}#send{border-radius:12px}
+.profile-editor{display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid var(--line);margin:8px 0}.profile-editor img{width:68px;height:68px;object-fit:cover;border-radius:50%;border:1px solid var(--line)}.profile-editor small{display:block;color:var(--muted);margin:3px 0 7px}
+.message-sender{display:block;color:var(--brand);font-weight:700;margin-bottom:4px}.message-reply{display:block;border-left:3px solid var(--brand);padding-left:8px;margin-bottom:6px;color:var(--muted)}.message-actions{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end;margin-top:7px}.message-action{font-size:11px;color:var(--muted);padding:3px 7px;border-radius:7px;background:var(--bg)}.message-action.delete-action{color:var(--danger)}
+.reaction-picker,.reaction-summary{display:flex;gap:6px;margin-top:6px}.reaction-picker{justify-content:flex-end;padding:5px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.reaction-picker button,.reaction-summary button{padding:3px 7px;border-radius:8px;background:var(--bg)}
+.deleted-copy{color:var(--muted);font-style:italic}.saved-list{display:flex;flex-direction:column;gap:7px;max-height:55vh;overflow:auto}.saved-item{padding:11px;text-align:left;border:1px solid var(--line);border-radius:10px;background:var(--bg);overflow-wrap:anywhere}
+#callOverlay{background:rgba(10,12,20,.78);backdrop-filter:blur(12px)}.call-panel{border:1px solid var(--line);border-radius:20px;background:var(--panel);box-shadow:0 24px 90px rgba(0,0,0,.32)}.call-tile{border-radius:14px;overflow:hidden;background:var(--bg)}
+@media(max-width:720px){#app{margin:0;height:100%;border:0;border-radius:0;grid-template-columns:1fr}#workspaceRail{display:none}.m{max-width:90%}#msgs{padding:14px 10px}}
+@media(prefers-reduced-motion:reduce){.rail-link,.row,.btn,.m{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
@@ -317,11 +336,12 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
 <div id="app">
   <nav id="workspaceRail" aria-label="Main navigation">
     <div class="rail-brand" aria-label="Chatty">C</div>
-    <small class="rail-version" id="railVersion">v1.0.32</small>
+    <small class="rail-version" id="railVersion">v1.0.34</small>
     <div class="rail-links">
       <button class="rail-link active" id="railChats" type="button" aria-label="Chats" title="Chats"><span>▣</span><small>Chats</small></button>
       <button class="rail-link" id="railSpaces" type="button" aria-label="Spaces coming soon" title="Spaces — coming soon" disabled><span>◇</span><small>Spaces</small><i>Soon</i></button>
       <button class="rail-link" id="railArcade" type="button" aria-label="Arcade" title="Arcade"><span>▦</span><small>Arcade</small></button>
+      <button class="rail-link" id="railSaved" type="button" aria-label="Saved messages" title="Saved messages"><span>☆</span><small>Saved</small></button>
     </div>
     <div class="rail-bottom"><button class="rail-link" id="railSettings" type="button" aria-label="Settings" title="Settings"><span>⚙</span><small>Settings</small></button></div>
   </nav>
@@ -339,6 +359,7 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
     <div id="lists"><div id="chatList"></div><div id="nearList" hidden></div></div>
     <button class="btn" id="addBtn">＋ Add a friend</button>
     <button class="btn ghost" id="createGroupBtn" style="margin:0 14px 12px">＋ Create a group</button>
+    <button class="btn ghost" id="savedMessagesBtn" type="button" style="margin:0 14px 12px">☆ Saved messages</button>
     <button class="btn ghost" id="arcadeBtn" type="button">🎮 Arcade</button>
   </aside>
   <main id="main">
@@ -425,6 +446,7 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
   <h3>Settings</h3>
   <p style="margin-bottom:8px">Your friend code: <b id="setCode" style="font-family:ui-monospace,Menlo,Consolas,monospace;user-select:all"></b></p>
   <input type="text" id="setName" maxlength="24" placeholder="Your name" autocomplete="off">
+  <div class="profile-editor"><img id="profilePreview" alt="Profile picture preview" hidden><div><b>Profile picture</b><small>PNG, JPEG or WebP · compressed before upload</small><input type="file" id="profileFile" accept="image/png,image/jpeg,image/webp"><button type="button" class="btn ghost" id="removeProfilePicture">Remove picture</button></div></div>
   <label class="opt"><input type="checkbox" id="setSound"> Play a sound for new messages</label>
   <label class="opt"><input type="checkbox" id="setNear"> Show me to people on my network (Nearby)</label>
   <div class="sec" id="versionSec">
@@ -473,7 +495,8 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
   <div class="sec"><b>Users</b><div class="acts" style="justify-content:flex-start;align-items:center"><input id="adminUserSearch" type="search" maxlength="100" placeholder="Search all users by username or ID…" aria-label="Search users" style="flex:1;min-width:160px"><button class="btn ghost" id="refreshUsers">Search / refresh</button></div><p class="note" id="adminUserCount">Loading users…</p><div id="adminUsers"></div><div class="acts" style="justify-content:flex-start"><button class="btn ghost" id="adminUsersPrev">Previous</button><button class="btn ghost" id="adminUsersNext">Next</button></div></div>
   <div class="sec"><b>Audit log</b><button class="btn ghost" id="refreshLogs">Refresh logs</button><div id="adminLogs"></div></div>
   <div class="sec owner-only" id="ownerPublishUpdate"><b>Publish update</b>
-    <p>Upload the Chatty HTML file. Chatty automatically generates the next patch version and stamps the release date when you publish.</p>
+    <p>Upload the Chatty HTML file. Choose a version or leave automatic patch numbering enabled.</p>
+    <label for="updateVersion">Version to publish</label><input type="text" id="updateVersion" value="auto" maxlength="32" placeholder="auto or 1.0.34" style="width:170px;padding:9px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);margin:7px 0">
     <input type="file" id="updateFile" accept=".html,text/html" style="display:block;width:100%;margin:8px 0">
     <textarea id="updateNotes" rows="3" maxlength="2000" placeholder="Release notes" style="width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);margin:6px 0"></textarea>
     <label class="opt"><input type="checkbox" id="updateForce"> Mark as forced update</label>
@@ -489,6 +512,7 @@ dialog{background:var(--panel);border:1px solid var(--line);border-radius:20px}
   </div>
   <div class="acts"><button class="btn" id="closeAdmin">Close</button></div>
 </dialog>
+<dialog id="savedMessagesDlg"><h3>Saved messages</h3><p>Saved messages are synced to your account.</p><div class="saved-list"></div><div class="acts"><button type="button" class="btn" onclick="this.closest('dialog').close()">Done</button></div></dialog>
 <dialog id="arcadeDlg" style="width:min(640px,94vw)">
   <h3>🎮 Chatty Arcade</h3>
   <p>Pick a game. Chatty keeps running behind it, and you can come back any time.</p>
@@ -554,7 +578,7 @@ const PEER_OPTS = Object.assign({ debug: 0, config: { iceServers: [
 
 /* ---------- storage (debounced) ---------- */
 const LS = 'chatty1:';
-const APP_VERSION = '1.0.32';
+const APP_VERSION = '1.0.34';
 const APP_RELEASE_DATE = '2026-11-17';
 $('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');
 if ($('railVersion')) $('railVersion').textContent = 'v' + APP_VERSION;
@@ -752,7 +776,7 @@ async function loadDbMessages(code, quiet = false) {
       const body = row.body ?? row.text ?? '';
       const ts = Number(row.created_at || row.createdAt || Date.now());
       if (!body) continue;
-      const m = { id, me: String(sender) === String(authUser && authUser.id) ? 1 : 0, senderName: row.sender_username || '', text: String(body), ts: ts < 1e12 ? ts * 1000 : ts, st: 2, replyBody:row.reply_body || '', replySenderName:row.reply_sender_username || '' };
+      const m = {id,me:String(sender)===String(authUser&&authUser.id)?1:0,senderName:row.sender_username||'',senderAvatar:row.sender_avatar||null,text:String(body),deleted:!!row.deleted_at,saved:!!row.is_saved,ts:ts<1e12?ts*1000:ts,st:2,replyBody:row.reply_body||'',replySenderName:row.reply_sender_username||''};
       arr.push(m); if (idxs[code]) idxs[code].add(id);
       const wasViewing = active === code && !document.hidden;
       if (!m.me && !wasViewing) { ct.unread = (ct.unread || 0) + 1; }
@@ -812,6 +836,7 @@ async function syncDbConversations() {
       const displayName = isGroup ? (row.group_name || 'Group chat') : username;
       const ct = contacts[key] || (contacts[key] = { code: key, backend: true, unread: 0, ts: Date.now() });
       ct.backend = true; ct.isGroup = isGroup; ct.conversationId = id; ct.userId = userId || null; ct.name = ct.custom ? ct.name : displayName;
+      if(!isGroup)ct.avatarData=row.other_avatar_data||null;
       ct.memberCount = Number(row.member_count || 0);
       if (row.last_message) { ct.last = String(row.last_message).slice(0, 80); ct.ts = Number(row.last_message_at || row.created_at || Date.now()); if (ct.ts < 1e12) ct.ts *= 1000; ct.lastMe = String(row.last_sender_id) === String(authUser && authUser.id) ? 1 : 0; }
     }
@@ -850,10 +875,11 @@ function dayLabel(ts) {
 }
 function listTime(ts) { return dayKey(ts) === dayKey(Date.now()) ? timeFmt.format(ts) : dateFmt.format(ts); }
 function hue(code) { let h = 0; for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) % 360; return h; }
-function setAvatar(el, name, code, online) {
-  el.style.background = 'hsl(' + hue(code) + ',50%,42%)';
-  el.textContent = (name.trim()[0] || '?').toUpperCase();
-  if (online) { const d = document.createElement('span'); d.className = 'dot'; el.appendChild(d); }
+function setAvatar(el,name,code,online,photo){
+  el.replaceChildren();el.style.background='hsl('+hue(code)+',50%,42%)';
+  if(typeof photo==='string'&&/^data:image\/(?:webp|jpeg|png);base64,/.test(photo)){const img=document.createElement('img');img.src=photo;img.alt='';img.style.cssText='width:100%;height:100%;object-fit:cover;border-radius:inherit';el.appendChild(img);}
+  else el.textContent=(name.trim()[0]||'?').toUpperCase();
+  if(online){const d=document.createElement('span');d.className='dot';el.appendChild(d);}
 }
 function newCode() {
   const a = new Uint8Array(8); crypto.getRandomValues(a);
@@ -1285,7 +1311,7 @@ function renderList() {
     for (const ct of arr) {
       const l = ct.backend ? null : links.get(ct.code), row = document.createElement('div');
       row.className = 'row' + (active === ct.code ? ' on' : ''); row.dataset.code = ct.code;
-      const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, ct.name, ct.code, l && l.online);
+      const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, ct.name, ct.code, l && l.online, ct.avatarData);
       const mid = document.createElement('div'); mid.className = 'mid';
       const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = ct.name;
       const pv = document.createElement('div'); pv.className = 'pv';
@@ -1313,7 +1339,7 @@ function renderNearby() {
   const h = document.createElement('div'); h.innerHTML = head; frag.appendChild(h.firstChild);
   for (const p of people) {
     const row = document.createElement('div'); row.className = 'row'; row.dataset.code = p.code;
-    const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, p.name, p.code, true);
+    const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, p.name, p.code, true, p.avatarData);
     const mid = document.createElement('div'); mid.className = 'mid';
     const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = p.name;
     const pv = document.createElement('div'); pv.className = 'pv'; pv.textContent = fmtCode(p.code);
@@ -1343,26 +1369,23 @@ function updateHeader() {
   if (ct.req) $('reqText').textContent = ct.name + ' isn’t in your contacts yet. Accept to chat, or block them.';
 }
 function tickChar(st) { return st === -1 ? '⚠' : st === 0 ? '🕓' : st === 1 ? '✓' : '✓✓'; }
-function msgEl(m) {
-  const d = document.createElement('div'); d.className = 'm ' + (m.me ? 'me' : 'them'); d.dataset.id = m.id;
-  if (contacts[active] && contacts[active].isGroup && !m.me && m.senderName) {
-    const sender = document.createElement('small'); sender.textContent = m.senderName; sender.style.cssText = 'display:block;color:var(--brand);font-weight:700;margin-bottom:3px'; d.appendChild(sender);
-  }
-  if (m.replyBody) { const reply = document.createElement('small'); reply.textContent = '↪ ' + (m.replySenderName || 'Reply') + ': ' + String(m.replyBody).slice(0, 180); reply.style.cssText = 'display:block;border-left:3px solid var(--brand);padding-left:7px;margin-bottom:5px;color:var(--muted)'; d.appendChild(reply); }
-  const t = document.createElement('span'); t.textContent = m.text;
-  const meta = document.createElement('span'); meta.className = 'meta'; meta.textContent = timeFmt.format(m.ts);
-  if (m.me) { const k = document.createElement('span'); k.className = 'tick' + (m.st === 2 ? ' d' : ''); k.textContent = tickChar(m.st); meta.appendChild(k); }
-  d.append(t, meta);
-  if (contacts[active] && contacts[active].isGroup && !String(m.id).startsWith('tmp:')) {
-    const tools = document.createElement('div'); tools.style.cssText = 'display:flex;gap:5px;margin-top:5px;justify-content:flex-end';
-    const replyBtn = document.createElement('button'); replyBtn.type = 'button'; replyBtn.textContent = '↩ Reply'; replyBtn.style.cssText = 'font-size:11px;color:var(--muted)';
-    replyBtn.onclick = () => { replyTarget = Number(m.id); $('input').placeholder = 'Replying to ' + (m.senderName || 'message'); $('input').focus(); };
-    const reactBtn = document.createElement('button'); reactBtn.type = 'button'; reactBtn.textContent = '☺ React'; reactBtn.style.cssText = 'font-size:11px;color:var(--muted)';
-    reactBtn.onclick = async () => { const emoji = prompt('Choose a reaction: 👍 ❤️ 😂 😮 😢 🎉'); if (!emoji) return; try { const existing = (m.reactions || []).some(x => x.user_id === authUser.id && x.reaction === emoji); await api('/api/messages/reactions',{method:existing ? 'DELETE' : 'POST',body:JSON.stringify({messageId:Number(m.id),reaction:emoji})}); await loadDbMessages(active, true); } catch(e) { toast(e.message); } };
-    tools.append(replyBtn, reactBtn); d.appendChild(tools);
-  }
-  if (Array.isArray(m.reactions) && m.reactions.length) { const r = document.createElement('small'); r.textContent = m.reactions.map(x => x.reaction).join(' '); r.style.cssText = 'display:block;margin-top:4px'; d.appendChild(r); }
-  return d;
+function msgEl(m){
+ const d=document.createElement('div');d.className='m '+(m.me?'me':'them')+(m.deleted?' deleted':'');d.dataset.id=m.id;
+ if(contacts[active]?.isGroup&&!m.me&&m.senderName){const s=document.createElement('small');s.textContent=m.senderName;s.className='message-sender';d.appendChild(s);}
+ if(m.replyBody){const r=document.createElement('small');r.textContent='↪ '+(m.replySenderName||'Reply')+': '+String(m.replyBody).slice(0,180);r.className='message-reply';d.appendChild(r);}
+ const t=document.createElement('span');t.textContent=m.deleted?'This message was deleted':m.text;if(m.deleted)t.className='deleted-copy';
+ const meta=document.createElement('span');meta.className='meta';meta.textContent=timeFmt.format(m.ts);if(m.me){const k=document.createElement('span');k.className='tick'+(m.st===2?' d':'');k.textContent=tickChar(m.st);meta.appendChild(k);}d.append(t,meta);
+ if(!m.deleted&&!String(m.id).startsWith('tmp:')&&contacts[active]?.backend){
+  const tools=document.createElement('div');tools.className='message-actions';
+  const action=(label,fn,cls='')=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.className='message-action '+cls;b.onclick=fn;tools.appendChild(b);};
+  action('↩ Reply',()=>{replyTarget=Number(m.id);$('input').placeholder='Replying to '+(m.senderName||'message');$('input').focus();});
+  action(m.saved?'★ Saved':'☆ Save',async()=>{try{await api('/api/messages/bookmark',{method:m.saved?'DELETE':'POST',body:JSON.stringify({messageId:Number(m.id)})});m.saved=!m.saved;renderMessages(true);}catch(e){toast(e.message);}});
+  action('☺ React',()=>{const p=document.createElement('div');p.className='reaction-picker';for(const emoji of ['👍','❤️','😂','😮','😢','🎉']){const b=document.createElement('button');b.type='button';b.textContent=emoji;b.onclick=async()=>{p.remove();try{const mine=(m.reactions||[]).some(x=>x.user_id===authUser.id&&x.reaction===emoji);await api('/api/messages/reactions',{method:mine?'DELETE':'POST',body:JSON.stringify({messageId:Number(m.id),reaction:emoji})});await loadDbMessages(active,true);}catch(e){toast(e.message);}};p.appendChild(b);}d.appendChild(p);});
+  if(m.me&&Date.now()-m.ts<=900000)action('Delete',async()=>{if(!confirm('Delete this message for everyone?'))return;try{await api('/api/messages/delete',{method:'POST',body:JSON.stringify({messageId:Number(m.id)})});m.deleted=true;m.text='This message was deleted';m.reactions=[];renderMessages(true);toast('Message deleted for everyone.');}catch(e){toast(e.message);}},'delete-action');
+  d.appendChild(tools);
+ }
+ if(Array.isArray(m.reactions)&&m.reactions.length){const counts=new Map();for(const x of m.reactions)counts.set(x.reaction,(counts.get(x.reaction)||0)+1);const r=document.createElement('div');r.className='reaction-summary';for(const [emoji,count] of counts){const b=document.createElement('button');b.type='button';b.textContent=emoji+' '+count;b.onclick=async()=>{try{const mine=m.reactions.some(x=>x.user_id===authUser.id&&x.reaction===emoji);await api('/api/messages/reactions',{method:mine?'DELETE':'POST',body:JSON.stringify({messageId:Number(m.id),reaction:emoji})});await loadDbMessages(active,true);}catch(e){toast(e.message);}};r.appendChild(b);}d.appendChild(r);}
+ return d;
 }
 function appendTo(parent, m) {
   const k = dayKey(m.ts);
@@ -1645,7 +1668,11 @@ function renderBlocked() {
     r.append(s, b); box.appendChild(r);
   }
 }
+let pendingAvatarData=authUser&&authUser.avatarData||null;
+$('profileFile').addEventListener('change',async()=>{const file=$('profileFile').files&&$('profileFile').files[0];if(!file)return;if(!/^image\/(png|jpeg|webp)$/.test(file.type)||file.size>4*1024*1024){toast('Choose a PNG, JPEG or WebP image under 4 MB.');$('profileFile').value='';return;}try{const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),scale=Math.min(1,512/Math.max(bitmap.width,bitmap.height));canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();let q=.84,data=canvas.toDataURL('image/webp',q);while(data.length>160000&&q>.4){q-=.08;data=canvas.toDataURL('image/jpeg',q);}if(data.length>160000)throw Error('Image too large after compression.');pendingAvatarData=data;$('profilePreview').src=data;$('profilePreview').hidden=false;}catch(e){toast(e.message||'Could not read image.');}});
+$('removeProfilePicture').onclick=()=>{pendingAvatarData=null;$('profilePreview').removeAttribute('src');$('profilePreview').hidden=true;$('profileFile').value='';};
 $('settingsBtn').onclick = () => {
+  pendingAvatarData=authUser&&authUser.avatarData||null;$('profileFile').value='';$('profilePreview').hidden=!pendingAvatarData;if(pendingAvatarData)$('profilePreview').src=pendingAvatarData;
   $('setCode').textContent = fmtCode(me.code); $('setName').value = me.name;
   $('installedVersion').textContent = 'v' + APP_VERSION + (APP_RELEASE_DATE !== 'Unpublished' ? ' · ' + APP_RELEASE_DATE : '');
   if ($('versionStatus') && !$('versionStatus').textContent.trim()) $('versionStatus').textContent = 'Update status has not been checked yet.';
@@ -1656,9 +1683,10 @@ $('settingsBtn').onclick = () => {
 };
 $('checkForUpdates').onclick = () => checkChattyUpdate(true);
 $('setNotif').onclick = () => { try { Notification.requestPermission().then(p => { toast(p === 'granted' ? 'Notifications on' : 'Notifications not allowed'); $('setNotif').hidden = p === 'granted'; }); } catch (e) {} };
-$('setDone').onclick = () => {
+$('setDone').onclick = async () => {
   const n = cleanName($('setName').value);
-  if (n && n !== me.name) { me.name = n; touch('me'); $('meName').textContent = n; setAvatar($('meAvatar'), n, me.code); lobbyRename(); }
+  if (n && n !== me.name) { me.name = n; touch('me'); $('meName').textContent = n; setAvatar($('meAvatar'), n, me.code, false, authUser && authUser.avatarData); lobbyRename(); }
+  if(authToken&&pendingAvatarData!==(authUser&&authUser.avatarData||null)){$('setDone').disabled=true;try{const result=await api('/api/profile',{method:'POST',body:JSON.stringify({avatarData:pendingAvatarData})});authUser=result.user;store.set('authUser',authUser);setAvatar($('meAvatar'),me.name,me.code,false,authUser.avatarData);for(const ct of Object.values(contacts))if(ct&&!ct.isGroup&&String(ct.userId)===String(authUser.id))ct.avatarData=authUser.avatarData;}catch(e){toast('Profile picture was not saved: '+e.message);$('setDone').disabled=false;return;}$('setDone').disabled=false;}
   settings.sound = $('setSound').checked;
   const near = $('setNear').checked;
   if (near !== settings.nearby) { settings.nearby = near; if (near) lobbyStart(); else lobbyStop(); }
@@ -2077,9 +2105,10 @@ $('publishUpdate').onclick = async () => {
     const html = await file.text();
     if (!html.includes('name="application-name" content="Chatty"')) throw new Error('That file is missing the Chatty application marker.');
     if (!/const APP_VERSION = ['"][^'"]{1,32}['"]/.test(html)) throw new Error('That file is missing APP_VERSION.');
-    const result = await api('/api/admin/update',{method:'POST',body:JSON.stringify({version:'auto',html,releaseNotes,forceUpdate:$('updateForce').checked})});
+    const requestedVersion=($('updateVersion').value||'auto').trim();if(requestedVersion!=='auto'&&!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(requestedVersion))throw new Error('Enter auto or a version such as 1.0.34.');
+    const result = await api('/api/admin/update',{method:'POST',body:JSON.stringify({version:requestedVersion,html,releaseNotes,forceUpdate:$('updateForce').checked})});
     resultBox.textContent = 'Published v' + result.version + ' · released ' + new Date(result.publishedAt).toLocaleString() + (result.sha256 ? ' · SHA-256 verified' : '');
-    $('updateFile').value = ''; await loadAdminUpdates();
+    $('updateFile').value = ''; $('updateVersion').value='auto'; await loadAdminUpdates();
   } catch(e) { resultBox.textContent = e.message; }
   finally { button.disabled = false; }
 };
@@ -2706,6 +2735,8 @@ $('railChats').addEventListener('click', () => {
   $('railChats').classList.add('active');
   if ($('app').classList.contains('inchat')) $('back').click();
 });
+async function openSavedMessages(){try{const data=await api('/api/messages/saved'),list=$('savedMessagesDlg').querySelector('.saved-list');list.replaceChildren();if(!(data.messages||[]).length){const p=document.createElement('p');p.className='note';p.textContent='No saved messages yet. Use ☆ Save on a message.';list.appendChild(p);}for(const row of data.messages||[]){const b=document.createElement('button');b.type='button';b.className='saved-item';b.textContent=(row.group_name||row.sender_username||'Saved message')+' · '+(row.deleted_at?'This message was deleted':row.body);b.onclick=()=>{const ct=Object.values(contacts).find(c=>c&&c.backend&&String(c.conversationId)===String(row.conversation_id));if(ct){$('savedMessagesDlg').close();openChat(ct.code);}else toast('Conversation unavailable.');};list.appendChild(b);}$('savedMessagesDlg').showModal();}catch(e){toast('Could not load saved messages: '+e.message);}}
+$('railSaved').addEventListener('click',openSavedMessages);$('savedMessagesBtn').addEventListener('click',openSavedMessages);
 $('railArcade').addEventListener('click', () => {
   document.querySelectorAll('.rail-link').forEach(button => button.classList.remove('active'));
   $('railArcade').classList.add('active');
@@ -2729,6 +2760,8 @@ let incomingCall = null;
 let callSignalCursor = 0;
 const callPeers = new Map();
 const callRemoteStreams = new Map();
+const pendingCallIce=new Map();let callRefreshBusy=false;
+let callIceServers=[{urls:['stun:stun.cloudflare.com:3478','stun:stun.l.google.com:19302']}];
 let localCallStream = null;
 let callMuted = false, callCameraOff = false, callRingTimer = null;
 function callToast(text){ if (typeof toast === "function") toast(text); else console.log(text); }
@@ -2747,9 +2780,7 @@ async function sendCallSignal(toUserId,payload){
 }
 function newCallPeer(person){
   if(callPeers.has(person.id)) return callPeers.get(person.id);
-  const pc=new RTCPeerConnection({iceServers:[
-    {urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}
-  ]});
+  const pc=new RTCPeerConnection({iceServers:callIceServers,iceCandidatePoolSize:4});
   callPeers.set(person.id,pc);
   if(localCallStream) localCallStream.getTracks().forEach(track=>pc.addTrack(track,localCallStream));
   pc.onicecandidate=e=>{if(e.candidate) sendCallSignal(person.id,{type:"ice",candidate:e.candidate.toJSON()}).catch(()=>{});};
@@ -2768,7 +2799,7 @@ async function negotiateCallPeer(person){
   await sendCallSignal(person.id,{type:"offer",description:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
 }
 async function handleCallSignal(signal){
-  const person={id:signal.from_user_id,username:"Participant"};
+  const person={id:signal.from_user_id,username:signal.from_username||"Participant"};
   const payload=JSON.parse(signal.payload);
   if(payload.type==="leave"){const pc=callPeers.get(person.id);if(pc)pc.close();callPeers.delete(person.id);return;}
   let pc=callPeers.get(person.id);
@@ -2780,21 +2811,19 @@ async function handleCallSignal(signal){
   }else if(payload.type==="answer"){
     if(pc && !pc.currentRemoteDescription) await pc.setRemoteDescription(payload.description);
   }else if(payload.type==="ice"){
-    if(pc && payload.candidate) try{await pc.addIceCandidate(payload.candidate);}catch(e){}
+    if(payload.candidate){if(pc&&pc.remoteDescription){try{await pc.addIceCandidate(payload.candidate);}catch(e){console.warn("ICE candidate rejected:",e);}}else{const q=pendingCallIce.get(person.id)||[];q.push(payload.candidate);pendingCallIce.set(person.id,q);}}
   }
+  if(pc&&pc.remoteDescription&&pendingCallIce.has(person.id)){const q=pendingCallIce.get(person.id)||[];pendingCallIce.delete(person.id);for(const c of q)try{await pc.addIceCandidate(c);}catch(e){console.warn("Queued ICE candidate rejected:",e);}}
 }
 async function refreshCallPeers(){
-  if(!liveCall) return;
-  const data=await api("/api/calls/participants?callId="+encodeURIComponent(liveCall.callId));
-  const people=data.participants||[];
-  for(const person of people) await negotiateCallPeer(person);
-  const signals=await api("/api/calls/signals?callId="+encodeURIComponent(liveCall.callId)+"&after="+callSignalCursor);
-  for(const signal of (signals.signals||[])){callSignalCursor=Math.max(callSignalCursor,Number(signal.id)||0);await handleCallSignal(signal);}
-  $("callState").textContent=people.length+1+" in call";
+ if(!liveCall||callRefreshBusy)return;callRefreshBusy=true;const id=liveCall.callId;
+ try{const data=await api("/api/calls/participants?callId="+encodeURIComponent(id));const people=data.participants||[];for(const person of people)await negotiateCallPeer(person);const signals=await api("/api/calls/signals?callId="+encodeURIComponent(id)+"&after="+callSignalCursor);for(const signal of (signals.signals||[])){callSignalCursor=Math.max(callSignalCursor,Number(signal.id)||0);await handleCallSignal(signal);}if(liveCall&&liveCall.callId===id)$("callState").textContent=(people.length+1)+" in call";}
+ finally{callRefreshBusy=false;}
 }
 async function enterCall(callId,mediaType,conversationId){
   if(liveCall) return;
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("Calls need a secure browser connection (HTTPS) and camera/microphone permission.");
+  const config=await api("/api/calls/config");if(Array.isArray(config.iceServers)&&config.iceServers.length)callIceServers=config.iceServers;
   localCallStream=await navigator.mediaDevices.getUserMedia({audio:true,video:mediaType==="video"});
   const ct=Object.values(contacts).find(c=>c && c.backend && String(c.conversationId)===String(conversationId));
   liveCall={callId,mediaType,conversationId};
@@ -2805,8 +2834,8 @@ async function enterCall(callId,mediaType,conversationId){
   if(mediaType==="video") callTile("local","You",localCallStream,true);
   else {const tile=document.createElement("div");tile.className="call-tile";tile.textContent="Voice call";$("callVideos").append(tile);}
   if(ct && active!==ct.code) openChat(ct.code);
-  if(callPollTimer) clearInterval(callPollTimer);
-  callPollTimer=setInterval(()=>refreshCallPeers().catch(e=>console.warn("Call sync:",e)),1100);
+  if(callPollTimer)clearInterval(callPollTimer);
+  callPollTimer=setInterval(()=>{if(!liveCall)return;api("/api/calls/ping",{method:"POST",body:JSON.stringify({callId:liveCall.callId})}).catch(()=>{});refreshCallPeers().catch(e=>{console.warn("Call sync:",e);$("callState").textContent="Reconnecting…";});},15000);
   await refreshCallPeers();
 }
 async function startAccountCall(mediaType){
@@ -2817,7 +2846,8 @@ async function startAccountCall(mediaType){
     const data=await api("/api/calls/start",{method:"POST",body:JSON.stringify({conversationId:ct.conversationId,mediaType})});
     await enterCall(data.callId,mediaType,ct.conversationId);
   }catch(e){
-    if(e.message==="A call is already active" && e.callId){callToast("A call is already active. Refresh the chat and join it from the incoming call prompt.");}
+    if(e.callId){try{await api("/api/calls/leave",{method:"POST",body:JSON.stringify({callId:e.callId})});}catch(_){}}
+    if(e.message==="A call is already active" && e.callId){callToast("A call is already active. Join it from the incoming call prompt.");}
     else callToast("Could not start call: "+e.message);
   }
 }
@@ -2831,11 +2861,11 @@ async function joinIncomingCall(){
 async function leaveAccountCall(){
   stopCallRinging();
   if(!liveCall)return;
-  const call=liveCall;liveCall=null;
+  const call=liveCall;
   if(callPollTimer)clearInterval(callPollTimer);callPollTimer=null;
   for(const [id,pc] of callPeers){try{await api("/api/calls/signal",{method:"POST",body:JSON.stringify({callId:call.callId,toUserId:id,payload:{type:"leave"}})});}catch(e){}pc.close();}
-  callPeers.clear();
-  if(localCallStream)localCallStream.getTracks().forEach(t=>t.stop());localCallStream=null;
+  liveCall=null;callPeers.clear();pendingCallIce.clear();callRemoteStreams.clear();
+  if(localCallStream)localCallStream.getTracks().forEach(t=>t.stop());localCallStream=null;callMuted=false;callCameraOff=false;callRefreshBusy=false;$("muteCall").textContent="Mute mic";$("cameraCall").textContent="Camera off";
   $("callOverlay").hidden=true;clearCallTiles();
   try{await api("/api/calls/leave",{method:"POST",body:JSON.stringify({callId:call.callId})});}catch(e){}
 }
@@ -2878,7 +2908,7 @@ function boot() {
     me.name = cleanName(me.name) || cleanName(authUser && authUser.username) || 'Chatty user';
   }
   syncDbConversations();
-  $('meName').textContent = me.name; setAvatar($('meAvatar'), me.name, me.code);
+  $('meName').textContent = me.name; setAvatar($('meAvatar'), me.name, me.code, false, authUser && authUser.avatarData);
   $('copyCode').textContent = fmtCode(me.code) + ' ⧉'; $('bigCode').textContent = fmtCode(me.code);
   renderList(); renderNearby(); updateTitle();
   startPeer();
