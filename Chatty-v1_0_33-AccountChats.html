@@ -2846,7 +2846,7 @@ async function refreshCallPeers(){
   for(const p of people){callPeople.set(String(p.id),p);await negotiateCallPeer(p);}
   for(const peerId of Array.from(callPeers.keys()))if(!activeIds.has(String(peerId)))removeCallPeer(peerId);
   const signals=await api("/api/calls/signals?callId="+encodeURIComponent(id)+"&after="+callSignalCursor);if(!liveCall||liveCall.callId!==id)return;
-  for(const signal of signals.signals||[]){try{await handleCallSignal(signal);}catch(e){console.warn("Call signal processing failed:",e);}finally{callSignalCursor=Math.max(callSignalCursor,Number(signal.id)||0);}}
+  for(const signal of signals.signals||[]){try{await handleCallSignal(signal);callSignalCursor=Math.max(callSignalCursor,Number(signal.id)||0);}catch(e){console.warn("Call signal processing failed; it will be retried:",e);break;}}
   $("callState").textContent=(people.length+1)+" in call";
  }finally{callRefreshBusy=false;}
 }
