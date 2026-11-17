@@ -2864,7 +2864,7 @@ async function enterCall(callId,mediaType,conversationId){
  if(ct&&active!==ct.code)openChat(ct.code);
  if(callPollTimer)clearInterval(callPollTimer);
  callPollTimer=setInterval(()=>refreshCallPeers().catch(e=>{$("callState").textContent="Connection interrupted — retrying…";console.warn("Call sync:",e);}),1200);
- await refreshCallPeers();
+ await refreshCallPeers().catch(e=>{ $("callState").textContent="Connecting — retrying…"; console.warn("Initial call sync:",e); });
 }
 async function startAccountCall(mediaType){
  const ct=active&&contacts[active];if(!ct||!ct.backend||!ct.conversationId){callToast("Calls are available in signed-in account chats.");return;}if(liveCall)return;
