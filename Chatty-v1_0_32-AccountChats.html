@@ -771,12 +771,18 @@ async function loadDbMessages(code, quiet = false) {
     const rows = Array.isArray(data.messages) ? data.messages : [];
     const arr = getChat(code);
     for (const row of rows) {
-      const id = String(row.id); if (hasMsg(code, id)) continue;
+      const id = String(row.id);
       const sender = row.sender_id || row.senderId;
       const body = row.body ?? row.text ?? '';
       const ts = Number(row.created_at || row.createdAt || Date.now());
       if (!body) continue;
-      const m = {id,me:String(sender)===String(authUser&&authUser.id)?1:0,senderName:row.sender_username||'',senderAvatar:row.sender_avatar||null,text:String(body),deleted:!!row.deleted_at,saved:!!row.is_saved,ts:ts<1e12?ts*1000:ts,st:2,replyBody:row.reply_body||'',replySenderName:row.reply_sender_username||''};
+      const nextMessage = {id,me:String(sender)===String(authUser&&authUser.id)?1:0,senderName:row.sender_username||'',senderAvatar:row.sender_avatar||null,text:String(body),deleted:!!row.deleted_at,saved:!!row.is_saved,ts:ts<1e12?ts*1000:ts,st:2,replyBody:row.reply_body||'',replySenderName:row.reply_sender_username||''};
+      const existing = arr.find(item => String(item.id) === id);
+      if (existing) {
+        Object.assign(existing, nextMessage);
+        continue;
+      }
+      const m = nextMessage;
       arr.push(m); if (idxs[code]) idxs[code].add(id);
       const wasViewing = active === code && !document.hidden;
       if (!m.me && !wasViewing) { ct.unread = (ct.unread || 0) + 1; }
