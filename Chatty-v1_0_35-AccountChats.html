@@ -940,8 +940,8 @@ async function loadEarlierDbMessages(code){
     const byMessage=new Map();for(const reaction of reactionData.reactions||[]){const id=String(reaction.message_id);if(!byMessage.has(id))byMessage.set(id,[]);byMessage.get(id).push(reaction);}
     for(const m of older)m.reactions=byMessage.get(String(m.id))||[];
    }catch(_){}
-   arr.unshift(...older);idxs[code]=new Set(arr.map(m=>String(m.id)));view.limit+=PAGE;touch('chat:'+code);
-   if(active===code){renderMessages(false);scroller.scrollTop=previousTop+(scroller.scrollHeight-previousHeight);}
+   arr.unshift(...older);idxs[code]=new Set(arr.map(m=>String(m.id)));touch('chat:'+code);
+   if(active===code){view.limit+=PAGE;renderMessages(false);scroller.scrollTop=previousTop+(scroller.scrollHeight-previousHeight);}
   }
   ct.hasOlderMessages=data.hasMore===true;if(active===code)$('more').hidden=!ct.hasOlderMessages;
  }catch(e){if(active===code)toast('Could not load earlier messages: '+e.message);}
