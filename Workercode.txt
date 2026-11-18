@@ -1233,7 +1233,7 @@ export default {
         }
         if (request.method === "GET" && !action) {
           const [members, admins] = await Promise.all([
-            env.DB.prepare(`SELECT u.id, u.username, cm.joined_at FROM conversation_members cm
+            env.DB.prepare(`SELECT u.id, u.username, u.avatar_data, cm.joined_at FROM conversation_members cm
               JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id = ? ORDER BY cm.joined_at, u.username`).bind(conversationId).all(),
             env.DB.prepare(`SELECT user_id FROM group_admins WHERE conversation_id = ?`).bind(conversationId).all()
           ]);
@@ -1688,6 +1688,8 @@ export default {
         `).bind(now).run();
         const result = await env.DB.prepare(`
           SELECT cs.id AS call_id, cs.conversation_id, cs.media_type, cs.created_by, cs.created_at,
+            (SELECT username FROM users WHERE id = cs.created_by) AS created_by_username,
+            (SELECT avatar_data FROM users WHERE id = cs.created_by) AS created_by_avatar,
             EXISTS(SELECT 1 FROM call_participants mine WHERE mine.call_id = cs.id AND mine.user_id = ?) AS is_participant,
             (SELECT COUNT(*) FROM call_participants cp WHERE cp.call_id = cs.id) AS participant_count,
             (SELECT GROUP_CONCAT(u.username, ', ') FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = cs.id) AS participant_names
@@ -1801,7 +1803,7 @@ export default {
         `).bind(now, callId, callId).run();
         const call = await env.DB.prepare("SELECT conversation_id FROM call_sessions WHERE id = ? AND ended_at IS NULL AND expires_at > ?").bind(callId, now).first();
         if (!call || !(await isConversationMember(env, call.conversation_id, user.id)) || !(await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first())) return json({ error: "Call not found" }, 404);
-        const people = await env.DB.prepare("SELECT u.id, u.username FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = ? AND cp.user_id != ?").bind(callId, user.id).all();
+        const people = await env.DB.prepare("SELECT u.id, u.username, u.avatar_data FROM call_participants cp JOIN users u ON u.id = cp.user_id WHERE cp.call_id = ? AND cp.user_id != ?").bind(callId, user.id).all();
         return json({ participants: people.results });
       }
 
@@ -1814,7 +1816,7 @@ export default {
         const after = Number.isSafeInteger(afterValue) && afterValue >= 0 ? afterValue : 0;
         const participant = await env.DB.prepare("SELECT 1 FROM call_participants WHERE call_id = ? AND user_id = ?").bind(callId, user.id).first();
         if (!participant) return json({ error: "Call not found" }, 404);
-        const result = await env.DB.prepare("SELECT s.id, s.from_user_id, s.payload, u.username AS from_username FROM call_signals s JOIN users u ON u.id = s.from_user_id WHERE s.call_id = ? AND s.to_user_id = ? AND s.id > ? ORDER BY s.id LIMIT 100").bind(callId, user.id, after).all();
+        const result = await env.DB.prepare("SELECT s.id, s.from_user_id, s.payload, u.username AS from_username, u.avatar_data AS from_avatar FROM call_signals s JOIN users u ON u.id = s.from_user_id WHERE s.call_id = ? AND s.to_user_id = ? AND s.id > ? ORDER BY s.id LIMIT 100").bind(callId, user.id, after).all();
         return json({ signals: result.results });
       }
 
