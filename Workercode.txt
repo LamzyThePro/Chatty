@@ -1449,7 +1449,13 @@ export default {
           return json({ error: "Conversation not found" }, 404);
         }
 
-        const result = await env.DB.prepare(`
+        const beforeRaw = url.searchParams.get("before");
+        const beforeId = beforeRaw === null ? null : Number(beforeRaw);
+        if (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId < 1)) {
+          return json({ error: "Invalid message cursor" }, 400);
+        }
+
+        const sql = `
           SELECT m.id, m.sender_id, u.username AS sender_username,
             CASE WHEN m.deleted_at IS NOT NULL THEN 'Message deleted' ELSE m.body END AS body,
             m.deleted_at, m.created_at, u.avatar_data AS sender_avatar,
@@ -1461,11 +1467,19 @@ export default {
             EXISTS(SELECT 1 FROM message_bookmarks bm
               WHERE bm.message_id = m.id AND bm.user_id = ?) AS is_saved
           FROM messages m JOIN users u ON u.id = m.sender_id
-          WHERE m.conversation_id = ?
-          ORDER BY m.id DESC LIMIT 50
-        `).bind(user.id, conversationId).all();
+          WHERE m.conversation_id = ? ${beforeId === null ? "" : "AND m.id < ?"}
+          ORDER BY m.id DESC LIMIT 51
+        `;
+        const statement = beforeId === null
+          ? env.DB.prepare(sql).bind(user.id, conversationId)
+          : env.DB.prepare(sql).bind(user.id, conversationId, beforeId);
+        const result = await statement.all();
+        const hasMore = result.results.length > 50;
 
-        return json({ messages: result.results.reverse() });
+        return json({
+          messages: result.results.slice(0, 50).reverse(),
+          hasMore
+        });
       }
 
       if (path === "/api/messages/send" && request.method === "POST") {
